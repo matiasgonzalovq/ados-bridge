@@ -24,6 +24,40 @@ export type SendMessageInput = {
   messageID?: string;
 };
 
+/**
+ * Public permission responses accepted by the bridge's MCP surface.
+ * `allow`/`deny` are the original bridge names; `reject` is OpenCode's own name for a refusal
+ * and is accepted as an alias so newer clients can speak OpenCode's vocabulary directly.
+ */
+export const PERMISSION_RESPONSES = ["allow", "deny", "once", "always", "reject"] as const;
+
+export type PermissionResponse = (typeof PERMISSION_RESPONSES)[number];
+
+/**
+ * The only values OpenCode accepts in `POST /session/:id/permissions/:permissionID`
+ * (`PermissionV1.Reply = ["once", "always", "reject"]` in @opencode-ai/schema v1.18.30).
+ * Anything else is rejected upstream with HTTP 400.
+ */
+export type OpencodePermissionReply = "once" | "always" | "reject";
+
+const OPENCODE_REPLIES: Record<PermissionResponse, OpencodePermissionReply> = {
+  allow: "once",
+  deny: "reject",
+  once: "once",
+  always: "always",
+  reject: "reject"
+};
+
+/**
+ * Translate a public bridge response into OpenCode's wire value.
+ * Never widens a grant: `deny`/`reject` refuse the call, `allow`/`once` grant exactly one
+ * use, and only an explicit `always` remembers the grant. An unrecognised value fails closed
+ * to `reject`, so a bad input can never become a permission grant.
+ */
+export function toOpencodePermissionReply(response: PermissionResponse): OpencodePermissionReply {
+  return OPENCODE_REPLIES[response] ?? "reject";
+}
+
 export type PermissionRequest = {
   id: string;
   sessionID: string;
@@ -242,11 +276,18 @@ export class OpencodeClient {
     return await this.request<OpencodeDiff[]>(`/session/${encodeURIComponent(sessionId)}/diff${query}`);
   }
 
-  async respondPermission(sessionId: string, permissionId: string, response: "allow" | "deny" | "once" | "always", remember = false): Promise<boolean> {
+  /**
+   * Answer a pending permission request. The public `response` is translated to OpenCode's
+   * wire vocabulary (`once | always | reject`) before the POST: OpenCode 1.18.30 answers
+   * HTTP 400 to the legacy public names (`deny` is refused with
+   * `expects "once" | "always" | "reject"`), so `deny` is sent upstream as `reject`.
+   */
+  async respondPermission(sessionId: string, permissionId: string, response: PermissionResponse, remember = false): Promise<boolean> {
+    const reply = toOpencodePermissionReply(response);
     return await this.request<boolean>(`/session/${encodeURIComponent(sessionId)}/permissions/${encodeURIComponent(permissionId)}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ response, remember })
+      body: JSON.stringify({ response: reply, remember })
     });
   }
 

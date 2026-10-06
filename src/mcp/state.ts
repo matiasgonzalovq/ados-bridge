@@ -12,6 +12,7 @@ import type {
   ToolResult
 } from "../types.js";
 import { safeTool } from "./results.js";
+import { reconcileInterventions } from "./interventions.js";
 import type { RegisterContext } from "./session.js";
 
 const MESSAGE_SAMPLE = 10;
@@ -159,6 +160,17 @@ export async function buildReport(
     const ownSessionId = session.opencodeSessionId;
     const ownPermissions = (permissions ?? []).filter((item) => item.sessionID === ownSessionId);
     const ownQuestions = (questions ?? []).filter((item) => item.sessionID === ownSessionId);
+
+    // OpenCode can keep listing a permission/question whose owning message is already
+    // completed (e.g. after opencode_abort). Reconcile before deriving state so a stale
+    // record never forces waiting-human, while every record we cannot prove obsolete
+    // stays counted as a real pending human request.
+    const [permissionPartition, questionPartition] = await Promise.all([
+      reconcileInterventions(client, ownSessionId, "permission", ownPermissions as unknown as InterventionRecord[]),
+      reconcileInterventions(client, ownSessionId, "question", ownQuestions as unknown as InterventionRecord[])
+    ]);
+    notes.push(...permissionPartition.notes, ...questionPartition.notes);
+
     const recent = messages ?? [];
     const observation: SessionObservation | null = observer?.snapshot(ownSessionId) ?? null;
 
@@ -184,8 +196,8 @@ export async function buildReport(
     const state: OperationalState = deriveOperationalState({
       now,
       rawState,
-      pendingPermissions: ownPermissions.length,
-      pendingQuestions: ownQuestions.length,
+      pendingPermissions: permissionPartition.actionable.length,
+      pendingQuestions: questionPartition.actionable.length,
       lastActivityAt,
       lastErrorAt,
       stalledMs: stalledThresholdMs(ctx.config.stalledMs)
@@ -215,8 +227,8 @@ export async function buildReport(
         ? { type: observation.lastCompletion.type, at: new Date(observation.lastCompletion.at).toISOString() }
         : null,
       pendingInterventions: {
-        permissions: ownPermissions as unknown as InterventionRecord[],
-        questions: ownQuestions as unknown as InterventionRecord[]
+        permissions: permissionPartition.actionable,
+        questions: questionPartition.actionable
       },
       lastError,
       execution: {

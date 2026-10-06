@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod/v4";
 import type { JsonValue } from "../types.js";
+import { PERMISSION_RESPONSES } from "../opencode/client.js";
 import { listProjects, validateRepoPath } from "../security/paths.js";
 import { destructiveCheckpoint, filterInsideRepo, resolveInsideRepo } from "../security/checkpoints.js";
 import { checkpointResult, safeTool } from "./results.js";
@@ -312,11 +313,14 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
     {
       title: "Respond to opencode permission",
       description:
-        "Allow or deny an opencode permission request surfaced in the session messages/status. Destructive: requires confirmCheckpoint=true when checkpoints are enabled.",
+        "Allow or deny an opencode permission request surfaced in the session messages/status. " +
+        "response: `once` or `allow` grants this single call, `always` remembers the grant, " +
+        "`deny` or `reject` refuses the call (the bridge sends both as OpenCode's `reject`). " +
+        "Destructive: requires confirmCheckpoint=true when checkpoints are enabled.",
       inputSchema: {
         bridgeSessionId: z.string().min(1),
         permissionId: z.string().min(1),
-        response: z.enum(["allow", "deny", "once", "always"]),
+        response: z.enum(PERMISSION_RESPONSES),
         remember: z.boolean().default(false),
         confirmCheckpoint: z.boolean().default(false)
       },

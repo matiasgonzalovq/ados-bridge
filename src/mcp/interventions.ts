@@ -32,6 +32,93 @@ export async function listInterventions(
   });
 }
 
+export type InterventionPartition = {
+  /** Records that can still change the session (safely counted as waiting-human). */
+  actionable: InterventionRecord[];
+  /** Records OpenCode can no longer act on; excluded from waiting-human. */
+  stale: InterventionRecord[];
+  /** Non-fatal observation problems (a stale check that could not be completed). */
+  notes: string[];
+};
+
+type MessageLookup = {
+  getMessageIfExists(sessionId: string, messageID: string): Promise<unknown>;
+};
+
+function owningMessageId(record: InterventionRecord): string | null {
+  const tool = record.tool;
+  if (tool === null || typeof tool !== "object" || Array.isArray(tool)) return null;
+  const messageID = (tool as { messageID?: unknown }).messageID;
+  return typeof messageID === "string" && messageID.length > 0 ? messageID : null;
+}
+
+function recordId(record: InterventionRecord): string {
+  return typeof record.id === "string" && record.id.length > 0 ? record.id : "unknown";
+}
+
+/**
+ * True only when the owning message itself carries a completion timestamp.
+ * OpenCode stamps `assistantMessage.time.completed` in `SessionProcessor.cleanup()`,
+ * which runs both on normal completion and on abort (where tool parts are closed with
+ * "Tool execution aborted"), so a completed owning message means the call the record
+ * belongs to is already over.
+ */
+function owningMessageCompleted(message: unknown): boolean {
+  if (typeof message !== "object" || message === null) return false;
+  const info = (message as { info?: unknown }).info;
+  if (typeof info !== "object" || info === null) return false;
+  const time = (info as { time?: unknown }).time;
+  if (typeof time !== "object" || time === null) return false;
+  return typeof (time as { completed?: unknown }).completed === "number";
+}
+
+/**
+ * Split OpenCode's pending permission/question records into actionable and stale ones.
+ *
+ * OpenCode keeps a record in `GET /permission` / `GET /question` while the ask is awaited,
+ * and an aborted message does not always clear it, so the raw list alone can outlive the
+ * work it belongs to. A record whose owning message (`tool.messageID`, stamped by every
+ * `ctx.ask`/`question.ask` call) already completed can no longer gate that tool call and
+ * must not force waiting-human. Everything else - records without an owning message, a
+ * message OpenCode no longer returns, or a lookup that failed - stays actionable, so a
+ * genuine human request is never suppressed.
+ */
+export async function reconcileInterventions(
+  client: MessageLookup,
+  opencodeSessionId: string,
+  kind: "permission" | "question",
+  records: InterventionRecord[]
+): Promise<InterventionPartition> {
+  const partition: InterventionPartition = { actionable: [], stale: [], notes: [] };
+  const outcomes = await Promise.all(
+    records.map(async (record) => {
+      const messageID = owningMessageId(record);
+      if (messageID === null) return { record, messageID, stale: false, failed: false };
+      try {
+        const message = await client.getMessageIfExists(opencodeSessionId, messageID);
+        return { record, messageID, stale: owningMessageCompleted(message), failed: false };
+      } catch (error) {
+        return { record, messageID, stale: false, failed: true, error };
+      }
+    })
+  );
+  for (const outcome of outcomes) {
+    if (outcome.stale) {
+      partition.stale.push(outcome.record);
+      partition.notes.push(
+        `stale ${kind} ${recordId(outcome.record)} ignored: owning message ${outcome.messageID} already completed`
+      );
+      continue;
+    }
+    partition.actionable.push(outcome.record);
+    if (outcome.failed) {
+      const message = outcome.error instanceof Error ? outcome.error.message : String(outcome.error);
+      partition.notes.push(`stale check unavailable for ${kind} ${recordId(outcome.record)}: ${message}`);
+    }
+  }
+  return partition;
+}
+
 export type AnswerQuestionInput = {
   bridgeSessionId: string;
   questionId: string;

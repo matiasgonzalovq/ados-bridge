@@ -302,3 +302,164 @@ describe("opencode_state", () => {
     expect(report.lastOperation).toBeNull();
   });
 });
+
+describe("opencode_state stale intervention reconciliation", () => {
+  function assistantMessage(id: string, createdAt: number, completedAt?: number) {
+    return {
+      info: { id, role: "assistant", time: { created: createdAt, ...(completedAt ? { completed: completedAt } : {}) } },
+      parts: []
+    };
+  }
+
+  it("does not force waiting-human for a permission whose owning message already completed", async () => {
+    const root = await makeTempRepo();
+    const now = Date.now();
+    const client = makeFakeClient({
+      statuses: { ses_probe: { type: "idle" } },
+      permissions: [
+        {
+          id: "perm_aborted",
+          sessionID: "ses_probe",
+          permission: "external_directory",
+          patterns: ["/var/*"],
+          always: ["/var/*"],
+          metadata: {},
+          tool: { messageID: "msg_aborted", callID: "call_1" }
+        }
+      ],
+      messages: [{ info: { id: "msg_u", role: "user", time: { created: now - 10 * MINUTE } }, parts: [] }],
+      acceptedMessages: { msg_aborted: assistantMessage("msg_aborted", now - 9 * MINUTE, now - 8 * MINUTE) }
+    });
+    const { ctx, seed } = await makeContext({ allowedRoots: [root], client });
+    const bridge = await seed(root);
+
+    const report = payload(await buildReport(ctx, bridge.bridgeSessionId));
+
+    expect(report.state).toBe("idle");
+    expect(report.pendingInterventions).toEqual({ permissions: [], questions: [] });
+    expect(report.notes.join(" | ")).toContain("stale permission perm_aborted");
+    expect(report.notes.join(" | ")).toContain("already completed");
+  });
+
+  it("keeps waiting-human for a live permission while dropping only the stale one", async () => {
+    const root = await makeTempRepo();
+    const now = Date.now();
+    const client = makeFakeClient({
+      statuses: { ses_probe: { type: "busy" } },
+      permissions: [
+        {
+          id: "perm_aborted",
+          sessionID: "ses_probe",
+          permission: "external_directory",
+          patterns: ["/var/*"],
+          always: ["/var/*"],
+          metadata: {},
+          tool: { messageID: "msg_aborted", callID: "call_1" }
+        },
+        {
+          id: "perm_live",
+          sessionID: "ses_probe",
+          permission: "bash",
+          patterns: ["rm *"],
+          metadata: {},
+          always: ["bash"],
+          tool: { messageID: "msg_live", callID: "call_2" }
+        }
+      ],
+      messages: [{ info: { id: "msg_u", role: "user", time: { created: now - 5_000 } }, parts: [] }],
+      acceptedMessages: {
+        msg_aborted: assistantMessage("msg_aborted", now - 9 * MINUTE, now - 8 * MINUTE),
+        msg_live: assistantMessage("msg_live", now - 4_000)
+      }
+    });
+    const { ctx, seed } = await makeContext({ allowedRoots: [root], client });
+    const bridge = await seed(root);
+
+    const report = payload(await buildReport(ctx, bridge.bridgeSessionId));
+
+    expect(report.state).toBe("waiting-human");
+    expect(report.pendingInterventions.permissions.map((item) => item.id)).toEqual(["perm_live"]);
+    expect(report.pendingInterventions.permissions.map((item) => item.id)).not.toContain("perm_aborted");
+  });
+
+  it("does not force waiting-human for a question whose owning message already completed", async () => {
+    const root = await makeTempRepo();
+    const now = Date.now();
+    const client = makeFakeClient({
+      statuses: { ses_probe: { type: "idle" } },
+      questions: [
+        {
+          id: "quest_stale",
+          sessionID: "ses_probe",
+          questions: [{ question: "Which one?", header: "Pick", options: [{ label: "a" }] }],
+          tool: { messageID: "msg_aborted", callID: "call_1" }
+        }
+      ],
+      messages: [{ info: { id: "msg_u", role: "user", time: { created: now - 10 * MINUTE } }, parts: [] }],
+      acceptedMessages: { msg_aborted: assistantMessage("msg_aborted", now - 9 * MINUTE, now - 8 * MINUTE) }
+    });
+    const { ctx, seed } = await makeContext({ allowedRoots: [root], client });
+    const bridge = await seed(root);
+
+    const report = payload(await buildReport(ctx, bridge.bridgeSessionId));
+
+    expect(report.state).toBe("idle");
+    expect(report.pendingInterventions).toEqual({ permissions: [], questions: [] });
+    expect(report.notes.join(" | ")).toContain("stale question quest_stale");
+  });
+
+  it("keeps waiting-human while the owning message is still in flight", async () => {
+    const root = await makeTempRepo();
+    const now = Date.now();
+    const client = makeFakeClient({
+      statuses: { ses_probe: { type: "busy" } },
+      permissions: [
+        {
+          id: "perm_live",
+          sessionID: "ses_probe",
+          permission: "bash",
+          patterns: ["rm *"],
+          metadata: {},
+          always: ["bash"],
+          tool: { messageID: "msg_live", callID: "call_1" }
+        }
+      ],
+      messages: [{ info: { id: "msg_u", role: "user", time: { created: now - 5_000 } }, parts: [] }],
+      acceptedMessages: { msg_live: assistantMessage("msg_live", now - 4_000) }
+    });
+    const { ctx, seed } = await makeContext({ allowedRoots: [root], client });
+    const bridge = await seed(root);
+
+    const report = payload(await buildReport(ctx, bridge.bridgeSessionId));
+
+    expect(report.state).toBe("waiting-human");
+    expect(report.pendingInterventions.permissions.map((item) => item.id)).toEqual(["perm_live"]);
+  });
+
+  it("keeps a permission actionable when its owning message cannot be resolved", async () => {
+    const root = await makeTempRepo();
+    const now = Date.now();
+    const client = makeFakeClient({
+      statuses: { ses_probe: { type: "busy" } },
+      permissions: [
+        {
+          id: "perm_unknown",
+          sessionID: "ses_probe",
+          permission: "external_directory",
+          patterns: ["/var/*"],
+          always: ["/var/*"],
+          metadata: {},
+          tool: { messageID: "msg_missing", callID: "call_1" }
+        }
+      ],
+      messages: [{ info: { id: "msg_u", role: "user", time: { created: now - 5_000 } }, parts: [] }]
+    });
+    const { ctx, seed } = await makeContext({ allowedRoots: [root], client });
+    const bridge = await seed(root);
+
+    const report = payload(await buildReport(ctx, bridge.bridgeSessionId));
+
+    expect(report.state).toBe("waiting-human");
+    expect(report.pendingInterventions.permissions.map((item) => item.id)).toEqual(["perm_unknown"]);
+  });
+});

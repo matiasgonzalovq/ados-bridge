@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { answerQuestion, listInterventions } from "../src/mcp/interventions.js";
+import { answerQuestion, listInterventions, reconcileInterventions } from "../src/mcp/interventions.js";
 import { makeContext, makeFakeClient, makeTempRepo } from "./fakes.js";
 import type { PermissionRequest, QuestionRequest } from "../src/opencode/client.js";
+import type { InterventionRecord } from "../src/types.js";
 
 const PERMISSION: PermissionRequest = {
   id: "perm_1",
@@ -198,5 +199,61 @@ describe("opencode_answer_question", () => {
 
     expect(result.isError).toBeUndefined();
     expect(result.structuredContent).toMatchObject({ ok: true, answered: false });
+  });
+});
+
+describe("reconcileInterventions", () => {
+  function message(completed?: number) {
+    return {
+      info: { id: "msg_x", role: "assistant", time: { created: 1_000, ...(completed ? { completed } : {}) } },
+      parts: []
+    };
+  }
+
+  function lookup(messages: Record<string, unknown>, error?: string) {
+    return {
+      async getMessageIfExists(_sessionId: string, messageID: string) {
+        if (error) throw new Error(error);
+        return messages[messageID] ?? null;
+      }
+    };
+  }
+
+  it("marks a record stale only when its owning message is completed", async () => {
+    const records: InterventionRecord[] = [
+      { id: "perm_aborted", tool: { messageID: "msg_aborted", callID: "call_1" } },
+      { id: "perm_live", tool: { messageID: "msg_live", callID: "call_2" } },
+      { id: "perm_unknown", tool: { messageID: "msg_missing", callID: "call_3" } },
+      { id: "perm_unowned" }
+    ];
+
+    const partition = await reconcileInterventions(
+      lookup({ msg_aborted: message(2_000), msg_live: message() }),
+      "ses_probe",
+      "permission",
+      records
+    );
+
+    expect(partition.stale.map((record) => record.id)).toEqual(["perm_aborted"]);
+    expect(partition.actionable.map((record) => record.id)).toEqual([
+      "perm_live",
+      "perm_unknown",
+      "perm_unowned"
+    ]);
+    expect(partition.notes.join(" | ")).toContain("stale permission perm_aborted");
+    expect(partition.notes.join(" | ")).not.toContain("perm_live");
+  });
+
+  it("keeps a record actionable and notes the problem when the lookup fails", async () => {
+    const partition = await reconcileInterventions(
+      lookup({}, "connect ECONNREFUSED 127.0.0.1:4096"),
+      "ses_probe",
+      "question",
+      [{ id: "quest_1", tool: { messageID: "msg_1", callID: "call_1" } }]
+    );
+
+    expect(partition.stale).toEqual([]);
+    expect(partition.actionable).toHaveLength(1);
+    expect(partition.notes.join(" | ")).toContain("stale check unavailable for question quest_1");
   });
 });
