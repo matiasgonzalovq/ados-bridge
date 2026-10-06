@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { access, chmod, writeFile } from "node:fs/promises";
+import { access, chmod, stat, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 export type InitOptions = {
@@ -39,9 +39,28 @@ export async function initEnv(options: InitOptions = {}): Promise<{ path: string
     ""
   ].join("\n");
 
-  await writeFile(envPath, content, "utf8");
+  await writeFile(envPath, content, { encoding: "utf8", mode: 0o600 });
   await chmod(envPath, 0o600);
   return { path: envPath, created: true, token };
+}
+
+export type EnvFileModeReport = {
+  path: string;
+  exists: boolean;
+  mode?: number;
+  ok: boolean;
+};
+
+/**
+ * Read-only permission audit for the local token file. Never modifies the file.
+ * Secrets live in this file, so it must stay owner-only (0600).
+ */
+export async function checkEnvFileMode(envPath = ".env"): Promise<EnvFileModeReport> {
+  const path = resolve(envPath);
+  const info = await stat(path).catch(() => null);
+  if (!info) return { path, exists: false, ok: true };
+  const mode = info.mode & 0o777;
+  return { path, exists: true, mode, ok: (mode & 0o077) === 0 };
 }
 
 async function exists(path: string): Promise<boolean> {

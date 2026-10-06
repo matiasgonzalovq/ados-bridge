@@ -81,6 +81,8 @@ export function loadConfig(argv = process.argv.slice(2)): BridgeConfig {
  allowedHosts: parseList(pick(args, "allowed-hosts", "OPENCODE_BRIDGE_ALLOWED_HOSTS"), ["127.0.0.1", "localhost", "hashimotoyugamac-mini.tailf9f6e3.ts.net"]),
     allowedRoots,
     bridgeToken: pick(args, "token", "OPENCODE_BRIDGE_TOKEN"),
+    checkpoints: pickBoolean(args, "checkpoints", "OPENCODE_BRIDGE_CHECKPOINTS", true),
+    stalledMs: pickNumber(args, "stalled-ms", "OPENCODE_BRIDGE_STALLED_MS", 120_000),
     opencodeBaseUrl: pick(args, "opencode-url", "OPENCODE_BASE_URL"),
     opencodeBin: pick(args, "opencode-bin", "OPENCODE_BIN", "opencode") ?? "opencode",
     opencodeHost: pick(args, "opencode-host", "OPENCODE_BRIDGE_OPENCODE_HOST", "127.0.0.1") ?? "127.0.0.1",

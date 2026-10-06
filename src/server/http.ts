@@ -8,6 +8,7 @@ import type { Request, Response, NextFunction } from "express";
 import type { BridgeConfig } from "../types.js";
 import { maskToken } from "../config/env.js";
 import { OpencodeProcessManager } from "../opencode/process.js";
+import { EventObserverRegistry } from "../opencode/events.js";
 import { StateStore } from "../state/store.js";
 import { createBridgeMcpServer } from "../mcp/tools.js";
 
@@ -15,13 +16,15 @@ export type BridgeRuntime = {
   config: BridgeConfig;
   processManager: OpencodeProcessManager;
   state: StateStore;
+  events: EventObserverRegistry;
 };
 
 export function createRuntime(config: BridgeConfig): BridgeRuntime {
   return {
     config,
     processManager: new OpencodeProcessManager(config),
-    state: new StateStore(config.stateDir)
+    state: new StateStore(config.stateDir),
+    events: new EventObserverRegistry()
   };
 }
 
@@ -171,6 +174,7 @@ export async function startHttpServer(runtime: BridgeRuntime): Promise<Server> {
   const httpServer = await listenWithFallback(app, config);
 
   const shutdown = async () => {
+    await runtime.events.stopAll().catch(() => undefined);
     await runtime.processManager.stop().catch(() => undefined);
     for (const transport of Object.values(transports)) {
       await transport.close().catch(() => undefined);

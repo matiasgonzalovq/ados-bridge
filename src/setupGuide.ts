@@ -15,27 +15,22 @@ const CHATGPT_CONNECTORS_SETTINGS_URL = "https://chatgpt.com/#settings/Connector
 const OPENAI_CONNECT_DOCS_URL = "https://developers.openai.com/apps-sdk/deploy/connect-chatgpt";
 const OPENCODE_SERVER_DOCS_URL = "https://opencode.ai/docs/server/";
 
-function withTokenInPath(url: string, token?: string): string | undefined {
-  if (!token) return undefined;
-  return `${url}/${encodeURIComponent(token)}`;
-}
-
-function withTokenQuery(url: string, token?: string): string | undefined {
-  if (!token) return undefined;
-  const separator = url.includes("?") ? "&" : "?";
-  return `${url}${separator}token=${encodeURIComponent(token)}`;
-}
-
 export function getSetupGuide({ config, localUrl, publicUrl, opencodeStatus }: SetupGuideInput): string {
   const connectorUrl = publicUrl ? `${publicUrl}/mcp` : `${localUrl}/mcp`;
-  const connectorUrlWithPathToken = withTokenInPath(connectorUrl, config.bridgeToken);
-  const connectorUrlWithQueryToken = withTokenQuery(connectorUrl, config.bridgeToken);
   const accessMode = publicUrl
     ? "READY: use the public HTTPS MCP endpoint below in ChatGPT."
     : "LOCAL ONLY: ChatGPT needs an HTTPS URL. Start with OPENCODE_BRIDGE_TUNNEL=cloudflare or use ngrok/Tailscale Funnel.";
-  const tokenLine = config.bridgeToken
-    ? `Bearer token: ${maskToken(config.bridgeToken)}\n   Header auth: Authorization: Bearer <your OPENCODE_BRIDGE_TOKEN>\n   Path auth URL: ${connectorUrlWithPathToken}\n   Query auth fallback: ${connectorUrlWithQueryToken}`
-    : "Bearer token: NOT SET\n   Set OPENCODE_BRIDGE_TOKEN before exposing this bridge outside localhost.";
+  const authLines = config.bridgeToken
+    ? [
+        `Bearer token: ${maskToken(config.bridgeToken)} (masked; the full value prints only via \`opencode-chatgpt-bridge show-token\`)`,
+        "Header auth (preferred): Authorization: Bearer <your OPENCODE_BRIDGE_TOKEN>",
+        "URL-token fallback: never printed here. Run `opencode-chatgpt-bridge show-token`,",
+        "   then append /<token> or ?token=<token> to the MCP URL only if your connector cannot send headers."
+      ]
+    : [
+        "Bearer token: NOT SET",
+        "Set OPENCODE_BRIDGE_TOKEN before exposing this bridge outside localhost."
+      ];
   const opencodeLines = opencodeStatus ? getOpencodeSetupText(opencodeStatus, config) : [];
 
   return [
@@ -61,9 +56,9 @@ export function getSetupGuide({ config, localUrl, publicUrl, opencodeStatus }: S
     "3) Create connector with these values",
     "   Connector name: opencode local bridge",
     "   Description: Control local opencode sessions, inspect diffs, and manage local coding tasks.",
-    `   Connector URL: ${connectorUrlWithPathToken ?? connectorUrl}`,
-    config.bridgeToken ? `   Plain MCP URL: ${connectorUrl}` : undefined,
-    `   ${tokenLine}`,
+    `   Connector URL: ${connectorUrl}`,
+    ...authLines.map((line) => `   ${line}`),
+    config.bridgeToken ? "   Auth modes: header (preferred); URL-token only via the explicit show-token command" : undefined,
     "",
     "4) Suggested first ChatGPT prompt after connecting",
     "   Use opencode local bridge. First call bridge_health and list_projects.",
@@ -81,6 +76,9 @@ export function getSetupGuide({ config, localUrl, publicUrl, opencodeStatus }: S
     "",
     "Security reminder:",
     "   Keep allowed roots narrow. Review opencode_get_diff before committing or pushing changes.",
+    "   Tokens stay masked here and in logs; only the show-token command prints the raw value.",
+    "   Sessions are re-checked against allowed roots on every call; read_file/find_files stay inside the repo.",
+    "   Destructive tools (stop/abort/permission) require confirmCheckpoint=true.",
     ""
   ]
     .filter((line): line is string => line !== undefined)

@@ -17,7 +17,55 @@ export type SendMessageInput = {
   noReply?: boolean;
   tools?: Record<string, boolean>;
   async?: boolean;
+  /**
+   * Stable client message id (OpenCode `messageID`, pattern `^msg`). OpenCode 1.18.30
+   * treats it as an idempotency key: resending the same id does not create a second prompt.
+   */
+  messageID?: string;
 };
+
+export type PermissionRequest = {
+  id: string;
+  sessionID: string;
+  permission?: string;
+  patterns?: string[];
+  metadata?: Record<string, unknown>;
+  always?: string[];
+  tool?: { messageID?: string; callID?: string };
+};
+
+export type QuestionOption = { label: string; description?: string };
+
+export type QuestionInfo = {
+  question: string;
+  header?: string;
+  options?: QuestionOption[];
+  multiple?: boolean;
+  custom?: boolean;
+};
+
+export type QuestionRequest = {
+  id: string;
+  sessionID: string;
+  questions: QuestionInfo[];
+  tool?: { messageID?: string; callID?: string };
+};
+
+const MAX_READ_ATTEMPTS = 3;
+const RETRY_BASE_DELAY_MS = 50;
+const IDEMPOTENT_METHODS = new Set(["GET", "HEAD"]);
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRetryableStatus(status: number): boolean {
+  return status === 429 || status >= 500;
+}
+
+function isTransientNetworkError(error: unknown): boolean {
+  return error instanceof TypeError;
+}
 
 export class OpencodeClient {
   private readonly baseUrl: string;
@@ -49,19 +97,52 @@ export class OpencodeClient {
     return headers;
   }
 
-  private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
-    const res = await this.fetchImpl(`${this.baseUrl}${path}`, {
-      ...init,
-      headers: this.headers(init.headers)
-    });
-    if (!res.ok) {
-      const body = await res.text().catch(() => "");
-      throw new Error(`opencode ${init.method ?? "GET"} ${path} failed: ${res.status} ${res.statusText}${body ? ` - ${body}` : ""}`);
+  private async request<T>(path: string, init: RequestInit = {}, options: { allowNotFound?: boolean } = {}): Promise<T> {
+    const method = (init.method ?? "GET").toUpperCase();
+    // Bounded resilience: only idempotent reads are retried, so retries can never
+    // duplicate prompts, permission answers, or any other state-changing write.
+    const retryable = IDEMPOTENT_METHODS.has(method);
+    const attempts = retryable ? MAX_READ_ATTEMPTS : 1;
+
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      let res: Response;
+      try {
+        res = await this.fetchImpl(`${this.baseUrl}${path}`, {
+          ...init,
+          headers: this.headers(init.headers)
+        });
+      } catch (error) {
+        if (!retryable || attempt === attempts || !isTransientNetworkError(error)) throw error;
+        await delay(RETRY_BASE_DELAY_MS * attempt);
+        continue;
+      }
+
+      if (!res.ok) {
+        if (options.allowNotFound && res.status === 404) return null as T;
+        const canRetry = retryable && isRetryableStatus(res.status) && attempt < attempts;
+        if (!canRetry) {
+          const body = await res.text().catch(() => "");
+          throw new Error(
+            `opencode ${method} ${path} failed: ${res.status} ${res.statusText}${body ? ` - ${body}` : ""}`
+          );
+        }
+        await res.text().catch(() => "");
+        await delay(RETRY_BASE_DELAY_MS * attempt);
+        continue;
+      }
+
+      if (res.status === 204) return undefined as T;
+      const text = await res.text();
+      if (!text) return undefined as T;
+      try {
+        return JSON.parse(text) as T;
+      } catch (error) {
+        throw new Error(
+          `opencode ${method} ${path} returned invalid JSON: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
     }
-    if (res.status === 204) return undefined as T;
-    const text = await res.text();
-    if (!text) return undefined as T;
-    return JSON.parse(text) as T;
+    throw new Error(`opencode ${method} ${path} failed after ${attempts} attempts`);
   }
 
   async health(): Promise<{ healthy: boolean; version?: string }> {
@@ -108,6 +189,43 @@ export class OpencodeClient {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body)
+    });
+  }
+
+  /** Fetch a single message by id; returns null when OpenCode has no such message (404). */
+  async getMessageIfExists(sessionId: string, messageID: string): Promise<OpencodeMessage | null> {
+    return await this.request<OpencodeMessage | null>(
+      `/session/${encodeURIComponent(sessionId)}/message/${encodeURIComponent(messageID)}`,
+      {},
+      { allowNotFound: true }
+    );
+  }
+
+  /** Pending permission requests across sessions on this opencode server (GET /permission). */
+  async listPermissions(): Promise<PermissionRequest[]> {
+    return await this.request<PermissionRequest[]>("/permission");
+  }
+
+  /** Pending question requests across sessions on this opencode server (GET /question). */
+  async listQuestions(): Promise<QuestionRequest[]> {
+    return await this.request<QuestionRequest[]>("/question");
+  }
+
+  /** Answer a pending question (POST /question/{requestID}/reply). Returns true on success. */
+  async answerQuestion(requestID: string, answers: string[][]): Promise<boolean> {
+    return await this.request<boolean>(`/question/${encodeURIComponent(requestID)}/reply`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ answers })
+    });
+  }
+
+  /** Reject a pending question without answering (POST /question/{requestID}/reject). */
+  async rejectQuestion(requestID: string): Promise<boolean> {
+    return await this.request<boolean>(`/question/${encodeURIComponent(requestID)}/reject`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({})
     });
   }
 
@@ -173,6 +291,7 @@ export class OpencodeClient {
   private messageBody(input: SendMessageInput): Record<string, unknown> {
     const model = input.providerID || input.modelID ? { providerID: input.providerID, modelID: input.modelID } : undefined;
     return {
+      messageID: input.messageID,
       model,
       agent: input.agent,
       noReply: input.noReply,

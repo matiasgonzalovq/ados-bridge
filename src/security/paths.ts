@@ -20,7 +20,7 @@ export async function resolveExistingPath(path: string): Promise<string> {
   return await realpath(path);
 }
 
-function isInside(parent: string, child: string): boolean {
+export function isInside(parent: string, child: string): boolean {
   const rel = relative(parent, child);
   return rel === "" || (!rel.startsWith("..") && rel !== ".." && !isAbsolute(rel));
 }

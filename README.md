@@ -2,15 +2,30 @@
 
 A standalone local MCP bridge that lets ChatGPT control `opencode` sessions running on your own computer.
 
+Architecture (forward path):
+
 ```text
 ChatGPT / ChatGPT Mobile
-  -> HTTPS tunnel
-  -> opencode-chatgpt-bridge /mcp
-  -> local opencode serve
+  -> Secure MCP (secure tunnel connector /mcp)
+  -> opencode-chatgpt-bridge (ADOS Bridge V1, 127.0.0.1:8790)
+  -> local opencode serve (127.0.0.1, per authorized repo)
   -> local repository
 ```
 
-This project is intentionally separate from LocalAnt. It is focused only on the ChatGPT <-> opencode bridge use case.
+Return path:
+
+```text
+local repository
+  -> opencode (edits, diff, status)
+  -> opencode-chatgpt-bridge (tool results, state, Git evidence)
+  -> Secure MCP
+  -> ChatGPT
+```
+
+This project is intentionally separate from LocalAnt and from ADOS Project OS. It is focused only on
+the ChatGPT <-> opencode bridge use case. It is **not** a global project administration layer: it does
+not track portfolio/progress, priorities, global governance, ActionIntent, or cross-project decisions
+(see [V1 scope](#v1-scope)).
 
 ## Quick start
 
@@ -33,7 +48,7 @@ When the bridge starts, it prints a setup guide with:
 - public HTTPS MCP URL when tunnel is enabled; Tailscale background service defaults to port 10000 to avoid LocalAnt using 443 and other active Funnel listeners
 - ChatGPT settings link
 - connector name, description, and URL to paste
-- header auth and URL-token fallback
+- header auth (preferred); the token itself is always masked
 - opencode CLI status and setup notes
 - first ChatGPT prompt to try
 
@@ -59,6 +74,7 @@ Run `opencode` once inside a repo and make sure your model provider is configure
 opencode-chatgpt-bridge init --allowed-roots /path/to/repos
 opencode-chatgpt-bridge start
 opencode-chatgpt-bridge doctor
+opencode-chatgpt-bridge show-token
 ```
 
 From source, use pnpm:
@@ -67,7 +83,11 @@ From source, use pnpm:
 pnpm run init -- --allowed-roots /path/to/repos
 pnpm start
 pnpm run doctor
+node dist/cli.js show-token
 ```
+
+`show-token` is the only command that prints the raw bridge token. `start`, `doctor`,
+status output, and logs always show a masked value.
 
 ## Background mode on macOS
 
@@ -114,16 +134,25 @@ Use the values printed by the bridge. They look like this:
 ```text
 Connector name: opencode local bridge
 Description: Control local opencode sessions, inspect diffs, and manage local coding tasks.
-Connector URL: https://example.trycloudflare.com/mcp?token=<generated-token>
+Connector URL: https://example.trycloudflare.com/mcp
+Bearer token: abcd…wxyz (masked)
 ```
 
-If your ChatGPT connector UI supports auth headers, you can use the plain `/mcp` URL and set:
+The token is never printed in full by `start` or `doctor`.
+
+If your ChatGPT connector UI supports auth headers, use the plain `/mcp` URL and set:
 
 ```text
 Authorization: Bearer <OPENCODE_BRIDGE_TOKEN>
 ```
 
-If not, use the printed `?token=` URL fallback.
+Header auth is the preferred mode. If your connector cannot send headers, print the
+URL-token variants explicitly and append them to the MCP URL:
+
+```bash
+opencode-chatgpt-bridge show-token
+# then use <connector-url>/<token> or <connector-url>?token=<token>
+```
 
 Once linked on ChatGPT Web, the connector should be available in ChatGPT mobile apps as well.
 
@@ -144,17 +173,39 @@ Notes:
 - If `OPENCODE_SERVER_PASSWORD` is not set, the bridge generates a random password per managed opencode server.
 - If `OPENCODE_BASE_URL` is set, the bridge uses that existing opencode server instead of spawning one.
 - The opencode server is kept on `127.0.0.1`; only the bridge is exposed to ChatGPT.
-- Provider/model login is handled by opencode. Run `opencode` in a terminal first and confirm it can answer/edit before using ChatGPT.
+- Provider/model login is handled by opencode. Run `opencode` in an opencode TUI first (not the bridge) and confirm it can answer/edit before using ChatGPT.
+
+### Attaching the opencode TUI (manual debugging)
+
+The bridge never opens an opencode TUI and never attaches one automatically. For a manual
+look at a server the bridge manages, run this yourself in a terminal:
+
+```bash
+opencode attach http://127.0.0.1:<port> -u <username> -p <password>
+# or credentials from the environment:
+OPENCODE_SERVER_USERNAME=opencode OPENCODE_SERVER_PASSWORD=<password> opencode attach http://127.0.0.1:<port>
+```
+
+Verified locally against opencode 1.18.30: attaching works and shows the live transcript, but it
+needs an interactive TTY (it fails when run without one) and the credentials must be supplied
+explicitly, otherwise it reports `401 Unauthorized`. Treat this as a human debugging step only.
 
 ## Features
 
 - Streamable HTTP MCP endpoint at `/mcp` for ChatGPT connectors and MCP clients.
 - Per-repository `opencode serve` process management.
-- Safe repository allow-listing with realpath checks.
-- Bridge bearer token for exposed/tunneled use.
-- URL-token fallback for connector UIs that do not support custom headers.
+- Safe repository allow-listing with realpath checks, re-validated for every session on every call.
+- Bridge bearer token for exposed/tunneled use; masked everywhere except the explicit `show-token` command.
+- Header auth preferred, URL-token fallback available only on explicit request (`show-token`).
+- Destructive checkpoints (default on) for `opencode_stop`, `opencode_abort`, `opencode_respond_permission`, and `opencode_answer_question`.
+- Read containment: `opencode_read_file` and `opencode_find_files` stay inside the session repository, always.
+- `.env` and `sessions.json` written with owner-only permissions (0600) and atomic state writes.
 - Persistent bridge session mapping in `~/.opencode-chatgpt-bridge/sessions.json`.
 - Tools for session creation, async prompts, polling, message retrieval, diff review, abort, permission responses, file reads, file search, VCS status, agents, slash commands, and provider/model diagnostics.
+- Operational state per session (`opencode_state`): derived `idle` / `busy` / `waiting-human` / `stalled` / `error`, not a raw busy flag.
+- Live observation of the opencode event stream (`GET /event`), one bounded reader per managed server, started lazily and stopped with the server.
+- Pending interventions surfaced and answered explicitly (`opencode_list_interventions`, `opencode_answer_question`).
+- Prompt idempotency through `messageID`, so an ambiguous send can be retried without creating a second prompt.
 - Optional Cloudflare quick tunnel launcher.
 - TypeScript, strict typecheck, and unit tests.
 
@@ -162,7 +213,7 @@ Notes:
 
 ### Bridge and project tools
 
-- `bridge_health` - inspect bridge config and managed opencode processes.
+- `bridge_health` - inspect bridge config, managed opencode processes, event observers, and the stalled threshold.
 - `list_projects` - list Git repos under the allowed roots.
 
 ### opencode process/session tools
@@ -172,18 +223,93 @@ Notes:
 - `opencode_create_session` - create a new opencode session and return a `bridgeSessionId`.
 - `opencode_list_sessions` - list bridge sessions known to this bridge.
 - `opencode_get_session_status` - poll status for a session.
-- `opencode_send_message` - send a prompt; defaults to async mode.
+- `opencode_send_message` - send a prompt; defaults to async mode; accepts an optional `messageID` for idempotent retries.
 - `opencode_get_messages` - fetch session transcript/messages.
 - `opencode_get_diff` - fetch file diffs for a session.
 - `opencode_abort` - abort a running session.
 - `opencode_respond_permission` - respond to opencode permission prompts.
+- `opencode_state` - derived operational state, pending interventions, activity, and last error for one session.
+- `opencode_list_interventions` - pending opencode permissions and questions for one session.
+- `opencode_answer_question` - answer a pending opencode question (checkpointed).
 
 ### project inspection tools
 
 - `opencode_read_file` - read a file through opencode.
 - `opencode_find_files` - fuzzy-find files through opencode.
 - `opencode_vcs_status` - get VCS and file status.
+- `opencode_git_status` - read-only Git evidence: branch, clean/staged/untracked/deleted/renamed/conflicted lists, ahead/behind.
+- `opencode_git_diff` - read-only Git evidence: unstaged + staged diffs and untracked-file evidence (never via `git add`).
 - `opencode_capabilities` - list opencode agents, slash commands, providers, auth methods, and default model config.
+
+## Operational state
+
+`opencode_get_session_status` reports what opencode itself says (`idle`, `busy`, `retry`). That is
+not enough on its own: a session waiting for a human answer reports `busy`, and a session stuck
+mid-run reports `busy` forever. Call `opencode_state` for the operational answer:
+
+| State | Meaning |
+| --- | --- |
+| `idle` | Nothing pending and opencode is not busy. |
+| `busy` | opencode is busy and there is recent activity (or no evidence of inactivity). |
+| `waiting-human` | A permission or question is pending and needs an explicit human choice. |
+| `stalled` | opencode is busy but nothing has been observed for longer than the threshold. |
+| `error` | The newest observed signal is an error (message error or `session.error` event). |
+
+Derivation order: pending intervention wins, then a fresh error, then busy vs stalled, else idle.
+Signals come from `GET /session/status`, pending permissions/questions, the last 10 messages, and
+the observed event stream. Fields the bridge cannot observe are `null` or `[]`; the report never
+invents an operation, an error, or a repository authorization.
+
+Configuration:
+
+```bash
+OPENCODE_BRIDGE_STALLED_MS=120000   # or --stalled-ms 120000; floor 5000
+```
+
+### Event stream observation
+
+The bridge opens one SSE reader per managed opencode server (`GET /event`, basic auth), lazily on
+the first `opencode_state` call, and stops it when that server stops or the bridge shuts down.
+Readers reconnect with capped backoff, keep at most 50 sessions x 10 events, and only ever feed
+operational state: no history, no control channel, nothing that can block a prompt. Server-level
+events (heartbeats, plugins) never count as session activity.
+
+### Interventions
+
+`opencode_list_interventions` polls `GET /permission` and `GET /question` and filters them to the
+session, so polling still works when the bridge attached to the event stream late.
+`opencode_answer_question` posts the chosen labels (`answers` holds one array of option labels per
+question) and is checkpointed: it returns a destructive checkpoint first and only runs with
+`confirmCheckpoint=true`. Answering is always an explicit human choice; the bridge never picks an
+option itself. An unknown question id surfaces opencode's 404 as an error, without retrying.
+
+### Prompt idempotency
+
+`opencode_send_message` accepts an optional `messageID`. When you retry after an ambiguous failure
+(network error, timeout), resend with the **same** value: opencode dedupes prompt creation on that
+id, and the bridge additionally checks whether the message already exists and returns
+`duplicate: true` instead of sending again. The bridge never retries an ambiguous POST on its own.
+The result also reports `stateTouch`, which says whether the bridge's own bookkeeping after the
+send worked; a failed `stateTouch` never means the prompt was rejected.
+
+## Git evidence (read-only)
+
+`opencode_git_diff` and `opencode_get_diff` can differ, and neither shows untracked files. For real,
+trustworthy repository evidence call `opencode_git_status` and `opencode_git_diff`. Both run **local Git**
+inside the authorized session repo only (the `repoPath` re-validated by the current `allowedRoots` on
+every call) and never mutate the index or working tree. Git is spawned with `execFile` (no shell),
+explicit arguments, a 10s timeout, bounded output, and a credential-free environment
+(`GIT_TERMINAL_PROMPT=0`, `GIT_OPTIONAL_LOCKS=0`), so the evidence reads never even take optional locks.
+
+- `opencode_git_status` - branch, head, upstream, ahead/behind, `clean`, and the staged / modified /
+  untracked / deleted / renamed / conflicted file lists plus `commitPending` / `pushPending`.
+- `opencode_git_diff` - unstaged changes (`git diff`), staged changes (`git diff --cached`), and evidence
+  for untracked files (detected with `git ls-files --others --exclude-standard`, shown via
+  `git diff --no-index -- /dev/null <path>` — no `git add` is ever run).
+
+Untracked evidence is containment-checked: a file is only read when it resolves strictly inside the
+work-tree root; symlinks are never followed (an escape or symlink is reported with a `note` instead of
+its content). A non-Git repo returns a structured `NOT_A_GIT_REPO` error rather than crashing.
 
 ## Example ChatGPT prompt
 
@@ -200,8 +326,17 @@ This bridge can cause local code modifications through opencode. Treat it as a l
 Default protections:
 
 - `opencode` itself is bound to `127.0.0.1`.
-- Repositories must be under `OPENCODE_BRIDGE_ALLOWED_ROOTS`.
-- The bridge supports bearer-token authentication and URL-token fallback.
+- Repositories must be under `OPENCODE_BRIDGE_ALLOWED_ROOTS`, and every bridge session is
+  re-checked against the roots active right now (deny by default, stale sessions cannot bypass it).
+- Bearer-token authentication with header auth preferred; the raw token is masked in
+  `start`, `doctor`, and status output and is printed only by the explicit `show-token` command.
+- `.env` and the state file are written 0600 (owner-only); `doctor` warns if `.env` is wider.
+- Destructive tools return a checkpoint (`isError: true`) and only proceed with `confirmCheckpoint=true`
+  when checkpoints are enabled (default on; `OPENCODE_BRIDGE_CHECKPOINTS=false` or `--checkpoints false` disables).
+  That covers `opencode_stop`, `opencode_abort`, `opencode_respond_permission`, and `opencode_answer_question`.
+- No POST is retried automatically, so an ambiguous send can never silently create a second prompt;
+  retries are explicit and keyed by `messageID`.
+- File reads are always contained to the session repository; there is no escape hatch.
 - No arbitrary shell execution tool is exposed by this bridge.
 - Diffs are first-class so clients can inspect changes before committing.
 
@@ -216,11 +351,64 @@ Strongly recommended:
 
 ```bash
 pnpm install
-pnpm run typecheck
+pnpm run typecheck   # src/ and tests/ (tsconfig.json + tsconfig.test.json)
 pnpm test
 pnpm run build
 pnpm run validate
 ```
+
+## V1 scope
+
+### Capabilities
+
+- **Project allowlist**: repositories are gated by `OPENCODE_BRIDGE_ALLOWED_ROOTS` (realpath-checked)
+  and re-validated on every call; a stale or unauthorized session is denied by default.
+- **Bridge/OpenCode sessions**: one `bridgeSessionId` per OpenCode session, persisted in
+  `~/.opencode-chatgpt-bridge/sessions.json`.
+- **Sending instructions**: `opencode_send_message` (sync or async) with an optional **`messageID`**
+  for idempotent retries (the bridge and OpenCode both dedupe on it; no ambiguous POST is retried
+  automatically).
+- **Operational state**: `opencode_state` derives `idle / busy / waiting-human / stalled / error` from
+  session status, pending permissions/questions, recent messages, and the event stream.
+- **SSE / events**: one bounded SSE reader per managed server (`GET /event`) for operational observation.
+- **waiting-human**: surfaced when a permission or question is pending and needs an explicit human choice.
+- **Permissions & questions**: `opencode_list_interventions` lists them; `opencode_respond_permission`
+  and `opencode_answer_question` answer them behind a destructive checkpoint.
+- **Abort**: `opencode_abort` stops a running session (checkpointed).
+- **Checkpoints**: destructive tools require `confirmCheckpoint=true` (default on).
+- **Git status / diff evidence** (read-only): `opencode_git_status` and `opencode_git_diff` read local Git
+  inside the authorized repo — branch, ahead/behind, clean, staged/modified/untracked/deleted/renamed/
+  conflicted, plus unstaged + staged diffs and untracked-file evidence (never via `git add`).
+- **Containment**: Git runs in the authorized repo only; untracked file content is read only when it
+  resolves inside the repo; symlinks are never followed; commands use explicit args (no shell).
+- **Structured errors**: MCP failures return `isError: true` with an actionable message (e.g.
+  `NOT_A_GIT_REPO`, `Unknown bridge session`).
+- **Secure MCP**: the bridge runs on `127.0.0.1`; ChatGPT reaches `/mcp` through the Secure MCP connector.
+- **OpenCode attach** for manual debugging: `opencode attach <url> -u <user> -p <pass>` in a terminal
+  (interactive TTY; credentials required).
+
+### Explicitly out of scope (belongs to ADOS Project OS)
+
+- Mission Control, portfolio / global progress, priorities, or recommendations.
+- Global governance and cross-project administration.
+- ActionIntent from Project OS and product decisions.
+- Managing or scheduling work across repositories.
+
+ADOS Bridge V1 is the execution + evidence layer for a single local project; it deliberately does not
+decide what to work on or across projects.
+
+## Known limitations
+
+- **Question / intervention E2E**: a real E2E was successfully verified: native OpenCode question ->
+  opencode_state waiting-human -> explicit human approval in ChatGPT -> checkpoint ->
+  opencode_answer_question -> OpenCode resumes -> session.idle. The `waiting-human` flow is
+  covered by unit tests and surfaced correctly by `opencode_state` in runtime.
+- **Unstaged renames**: `opencode_git_diff` may present an unstaged rename as delete + add (no `-M`),
+  while `opencode_git_status` reports it correctly as a rename.
+- **Rare path quoting**: paths with unusual characters may need more robust unquoting in `git diff`
+  evidence; `core.quotepath=false` is applied via the Git environment.
+- **Very large repositories**: status parsing caps entries (5000) and diff evidence caps files/patch size;
+  evidence is operational and may not be exhaustive for huge repos.
 
 ## License
 

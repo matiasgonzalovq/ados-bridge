@@ -1,14 +1,23 @@
 import type { JsonValue, ToolResult } from "../types.js";
 
-export function toolResult<T extends JsonValue>(structuredContent: T): ToolResult<T> {
+export function toolResult<T extends JsonValue>(
+  structuredContent: T,
+  options?: { isError?: boolean }
+): ToolResult<T> {
   return {
+    ...(options?.isError ? { isError: true } : {}),
     structuredContent,
     content: [{ type: "text", text: JSON.stringify(structuredContent, null, 2) }]
   };
 }
 
 export function errorResult(message: string): ToolResult<{ ok: false; error: string }> {
-  return toolResult({ ok: false, error: message });
+  return toolResult({ ok: false, error: message }, { isError: true });
+}
+
+/** Blocked destructive call: not executed, requires an explicit confirmCheckpoint=true retry. */
+export function checkpointResult<T extends JsonValue>(payload: T): ToolResult<T> {
+  return toolResult(payload, { isError: true });
 }
 
 export async function safeTool<T extends JsonValue>(fn: () => Promise<T>): Promise<ToolResult<T | { ok: false; error: string }>> {
