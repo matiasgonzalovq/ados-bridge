@@ -1,7 +1,7 @@
 # ADOS Bridge
 
-[![License: MIT](https://img.shields.io/github/license/matiasgonzalovq/opencode-chatgpt-bridge)](LICENSE)
-[![Version](https://img.shields.io/github/v/tag/matiasgonzalovq/opencode-chatgpt-bridge?label=version)](https://github.com/matiasgonzalovq/opencode-chatgpt-bridge/tags)
+[![License: MIT](https://img.shields.io/github/license/matiasgonzalovq/ados-bridge)](LICENSE)
+[![Version](https://img.shields.io/github/v/tag/matiasgonzalovq/ados-bridge?label=version)](https://github.com/matiasgonzalovq/ados-bridge/tags)
 [![Node](https://img.shields.io/badge/node-%3E%3D20-339933)](package.json)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6)](tsconfig.json)
 
@@ -95,8 +95,8 @@ not track portfolio/progress, priorities, global governance, ActionIntent, or cr
 Requires Node.js 20+, pnpm 10+, and an authenticated `opencode` — see [Requirements](#requirements).
 
 ```bash
-git clone https://github.com/matiasgonzalovq/opencode-chatgpt-bridge.git
-cd opencode-chatgpt-bridge
+git clone https://github.com/matiasgonzalovq/ados-bridge.git
+cd ados-bridge
 pnpm install
 pnpm run build
 pnpm run init -- --allowed-roots /path/to/your/repos
@@ -470,8 +470,8 @@ items may change or be dropped:
 - **Packaging and onboarding** — a smoother install path (published package / single-command install),
   guided first-run onboarding, and a CI validation workflow running `pnpm run validate` on every push.
 
-Track progress in [Issues](https://github.com/matiasgonzalovq/opencode-chatgpt-bridge/issues); released
-versions are tagged on the [Tags](https://github.com/matiasgonzalovq/opencode-chatgpt-bridge/tags) page.
+Track progress in [Issues](https://github.com/matiasgonzalovq/ados-bridge/issues); released
+versions are tagged on the [Tags](https://github.com/matiasgonzalovq/ados-bridge/tags) page.
 
 ## Contributing
 

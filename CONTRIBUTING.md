@@ -8,14 +8,14 @@ open a focused pull request.
 - Node.js 20+ and pnpm 10+.
 - Run `opencode` locally if you intend to exercise runtime behavior end to end (not required for
   typecheck/unit tests).
-- Search [existing issues](https://github.com/matiasgonzalovq/opencode-chatgpt-bridge/issues) and open
+- Search [existing issues](https://github.com/matiasgonzalovq/ados-bridge/issues) and open
   one for larger changes before writing code.
 
 ## Development workflow
 
 ```bash
-git clone https://github.com/<your-fork>/opencode-chatgpt-bridge.git
-cd opencode-chatgpt-bridge
+git clone https://github.com/<your-fork>/ados-bridge.git
+cd ados-bridge
 pnpm install
 
 pnpm run dev        # run from source (tsx)
