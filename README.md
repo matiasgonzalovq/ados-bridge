@@ -1,5 +1,6 @@
 # ADOS Bridge
 
+[![CI](https://github.com/matiasgonzalovq/ados-bridge/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/matiasgonzalovq/ados-bridge/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/github/license/matiasgonzalovq/ados-bridge)](LICENSE)
 [![Version](https://img.shields.io/github/v/tag/matiasgonzalovq/ados-bridge?label=version)](https://github.com/matiasgonzalovq/ados-bridge/tags)
 [![Node](https://img.shields.io/badge/node-%3E%3D20-339933)](package.json)
