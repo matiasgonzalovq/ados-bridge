@@ -1,6 +1,13 @@
 # ADOS Bridge
 
-A standalone local MCP bridge that lets ChatGPT control `opencode` sessions running on your own computer.
+[![License: MIT](https://img.shields.io/github/license/matiasgonzalovq/opencode-chatgpt-bridge)](LICENSE)
+[![Version](https://img.shields.io/github/v/tag/matiasgonzalovq/opencode-chatgpt-bridge?label=version)](https://github.com/matiasgonzalovq/opencode-chatgpt-bridge/tags)
+[![Node](https://img.shields.io/badge/node-%3E%3D20-339933)](package.json)
+[![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6)](tsconfig.json)
+
+**Supervised local execution: drive your own OpenCode from ChatGPT.** ADOS Bridge exposes a local
+OpenCode session to ChatGPT over a secure MCP connection, so the model can read, edit and report
+inside your own repositories while every destructive step stays behind an explicit human decision.
 
 **Developed and maintained by Matías Valdebenito Quezada.**
 
@@ -9,14 +16,58 @@ A standalone local MCP bridge that lets ChatGPT control `opencode` sessions runn
 > **yuga-hashimoto**, and remains **MIT**-licensed. The original copyright notice is preserved in
 > [LICENSE](LICENSE); attribution and modification details are in [NOTICE](NOTICE).
 > No ownership of the upstream code is claimed here.
-> The npm package name and CLI binary are still `opencode-chatgpt-bridge` (unchanged in this pass).
+> The npm package name and CLI binary remain `opencode-chatgpt-bridge`.
 
-Architecture (forward path):
+*If ADOS Bridge is useful to you, a star on the repository is the simplest way to help others find it.*
+
+## Features
+
+What is implemented and shipped in V1:
+
+- **OpenCode session lifecycle** — start/stop a per-repository `opencode serve`, create and list
+  sessions, send prompts (sync or async), fetch messages and diffs, abort. Streamable HTTP MCP at
+  `/mcp` for ChatGPT connectors and other MCP clients; the session map persists in
+  `~/.opencode-chatgpt-bridge/sessions.json`; agents, slash commands, and provider/model diagnostics
+  are exposed through `opencode_capabilities`.
+- **Operational state** — `opencode_state` derives `idle` / `busy` / `waiting-human` / `stalled` /
+  `error` from session status, pending interventions, recent messages, and a bounded SSE reader per
+  managed server, instead of a raw busy flag.
+- **Human interventions and checkpoints** — pending permissions and questions are listed and answered
+  explicitly (`opencode_list_interventions`, `opencode_respond_permission`, `opencode_answer_question`).
+  Destructive tools return a checkpoint and only run with `confirmCheckpoint=true` (default on), and
+  the bridge never picks an answer for you.
+- **Idempotent messaging** — `opencode_send_message` accepts a `messageID`, so an ambiguous send can be
+  retried without creating a second prompt; the bridge never retries a POST automatically.
+- **Read-only Git evidence** — `opencode_git_status` and `opencode_git_diff` run local Git inside the
+  authorized repo only (explicit args, no shell, no index mutation, credential-free environment) for
+  branch, ahead/behind, staged/modified/untracked/deleted/renamed/conflicted files, and diffs.
+- **Allowlisted repositories and security boundaries** — roots are realpath-checked against
+  `OPENCODE_BRIDGE_ALLOWED_ROOTS` and re-validated on every call (deny by default), file reads stay
+  inside the session repository, the bridge listens on `127.0.0.1`, the bearer token is masked
+  everywhere except the explicit `show-token`, and `.env` / state files are written 0600 with atomic
+  writes. This is an authorization boundary, **not** a sandbox — read the
+  [Security model](#security-model).
+- **Operations and tunneling** — optional Cloudflare quick tunnel, Tailscale Funnel flow, macOS
+  LaunchAgent background mode, `doctor` diagnostics, and a printed setup guide on every start.
+- **Engineering** — TypeScript, strict typecheck, unit tests, `pnpm run validate`.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    CG["ChatGPT / ChatGPT Mobile"] -->|"Secure MCP connector (/mcp)"| TUN["Secure MCP tunnel<br/>Cloudflare / Tailscale Funnel"]
+    TUN -->|"HTTPS + bearer token"| BR["ADOS Bridge<br/>127.0.0.1:8790<br/>allowlist, checkpoints, state"]
+    BR -->|"opencode serve (127.0.0.1, per repo)"| OC["OpenCode"]
+    OC --> REPO["Local repository<br/>(allowlisted root)"]
+    REPO -.->|"future / optional integration"| POS["ADOS Project OS<br/>roadmap - not part of V1"]
+```
+
+Forward path:
 
 ```text
 ChatGPT / ChatGPT Mobile
   -> Secure MCP (secure tunnel connector /mcp)
-  -> opencode-chatgpt-bridge (ADOS Bridge V1, 127.0.0.1:8790)
+  -> ADOS Bridge (opencode-chatgpt-bridge, 127.0.0.1:8790)
   -> local opencode serve (127.0.0.1, per authorized repo)
   -> local repository
 ```
@@ -26,10 +77,13 @@ Return path:
 ```text
 local repository
   -> opencode (edits, diff, status)
-  -> opencode-chatgpt-bridge (tool results, state, Git evidence)
+  -> ADOS Bridge (tool results, state, Git evidence)
   -> Secure MCP
   -> ChatGPT
 ```
+
+Only the bridge is reachable from outside; OpenCode and the repository stay local. ADOS Project OS is
+shown as a future/optional integration and is **not** part of this release.
 
 This project is intentionally separate from LocalAnt and from ADOS Project OS. It is focused only on
 the ChatGPT <-> opencode bridge use case. It is **not** a global project administration layer: it does
@@ -38,12 +92,14 @@ not track portfolio/progress, priorities, global governance, ActionIntent, or cr
 
 ## Quick start
 
+Requires Node.js 20+, pnpm 10+, and an authenticated `opencode` — see [Requirements](#requirements).
+
 ```bash
 git clone https://github.com/matiasgonzalovq/opencode-chatgpt-bridge.git
 cd opencode-chatgpt-bridge
 pnpm install
 pnpm run build
-pnpm run init -- --allowed-roots /Volumes/MOVESPEED/Documents/GitHub
+pnpm run init -- --allowed-roots /path/to/your/repos
 pnpm start
 ```
 
@@ -198,25 +254,6 @@ OPENCODE_SERVER_USERNAME=opencode OPENCODE_SERVER_PASSWORD=<password> opencode a
 Verified locally against opencode 1.18.30: attaching works and shows the live transcript, but it
 needs an interactive TTY (it fails when run without one) and the credentials must be supplied
 explicitly, otherwise it reports `401 Unauthorized`. Treat this as a human debugging step only.
-
-## Features
-
-- Streamable HTTP MCP endpoint at `/mcp` for ChatGPT connectors and MCP clients.
-- Per-repository `opencode serve` process management.
-- Safe repository allow-listing with realpath checks, re-validated for every session on every call.
-- Bridge bearer token for exposed/tunneled use; masked everywhere except the explicit `show-token` command.
-- Header auth preferred, URL-token fallback available only on explicit request (`show-token`).
-- Destructive checkpoints (default on) for `opencode_stop`, `opencode_abort`, `opencode_respond_permission`, and `opencode_answer_question`.
-- Read containment: `opencode_read_file` and `opencode_find_files` stay inside the session repository, always.
-- `.env` and `sessions.json` written with owner-only permissions (0600) and atomic state writes.
-- Persistent bridge session mapping in `~/.opencode-chatgpt-bridge/sessions.json`.
-- Tools for session creation, async prompts, polling, message retrieval, diff review, abort, permission responses, file reads, file search, VCS status, agents, slash commands, and provider/model diagnostics.
-- Operational state per session (`opencode_state`): derived `idle` / `busy` / `waiting-human` / `stalled` / `error`, not a raw busy flag.
-- Live observation of the opencode event stream (`GET /event`), one bounded reader per managed server, started lazily and stopped with the server.
-- Pending interventions surfaced and answered explicitly (`opencode_list_interventions`, `opencode_answer_question`).
-- Prompt idempotency through `messageID`, so an ambiguous send can be retried without creating a second prompt.
-- Optional Cloudflare quick tunnel launcher.
-- TypeScript, strict typecheck, and unit tests.
 
 ## MCP tools
 
@@ -418,6 +455,40 @@ decide what to work on or across projects.
   evidence; `core.quotepath=false` is applied via the Git environment.
 - **Very large repositories**: status parsing caps entries (5000) and diff evidence caps files/patch size;
   evidence is operational and may not be exhaustive for huge repos.
+
+## Roadmap
+
+Direction of travel for ADOS Bridge. **Nothing in this section is shipped** — it is planning only, and
+items may change or be dropped:
+
+- **Secure tunnel autostart hardening** — make tunnel bring-up reliable across reboot/login (retry and
+  health checks for the Cloudflare quick tunnel, cleaner Tailscale Funnel lifecycle, fail-loud startup
+  when the public endpoint is not ready).
+- **ADOS Project OS integration** — an optional layer that connects this V1 execution + evidence
+  runtime to Project OS (mission control, priorities, ActionIntent). Explicitly out of scope for V1;
+  ADOS Bridge stays usable standalone without it.
+- **Packaging and onboarding** — a smoother install path (published package / single-command install),
+  guided first-run onboarding, and a CI validation workflow running `pnpm run validate` on every push.
+
+Track progress in [Issues](https://github.com/matiasgonzalovq/opencode-chatgpt-bridge/issues); released
+versions are tagged on the [Tags](https://github.com/matiasgonzalovq/opencode-chatgpt-bridge/tags) page.
+
+## Contributing
+
+Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for the short workflow
+(fork, branch, `pnpm run validate`, focused pull request).
+
+Before you start, note two non-negotiables:
+
+- **Never commit secrets.** No `.env`, tokens, private keys, or credentials — `.env` is gitignored and
+  only `.env.example` is tracked.
+- **Security reports do not belong in issues or pull requests.** Follow [SECURITY.md](SECURITY.md).
+
+## Security
+
+See [SECURITY.md](SECURITY.md) for responsible disclosure guidance. In short: use GitHub private
+vulnerability reporting if it is enabled for this repository; otherwise open a minimal, non-sensitive
+issue asking for a private contact path. Never post secrets, tokens, or exploit details publicly.
 
 ## License
 
