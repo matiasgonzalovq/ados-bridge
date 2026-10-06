@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # pnpm 12.6.0 is the version the pnpm-lock.yaml in this repo was produced with.
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 12.6.0
+
+      # Node 24 LTS satisfies engines.node (>=20).
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: pnpm
+
+      # --ignore-scripts: pnpm 12 fails with ERR_PNPM_IGNORED_BUILDS otherwise,
+      # because esbuild's build script is not allowlisted in this repository.
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Run validation
+        run: pnpm run validate
