@@ -1,6 +1,15 @@
-# opencode-chatgpt-bridge
+# ADOS Bridge
 
 A standalone local MCP bridge that lets ChatGPT control `opencode` sessions running on your own computer.
+
+**Developed and maintained by Matías Valdebenito Quezada.**
+
+> **Provenance:** ADOS Bridge is based on
+> [opencode-chatgpt-bridge](https://github.com/yuga-hashimoto/opencode-chatgpt-bridge) by
+> **yuga-hashimoto**, and remains **MIT**-licensed. The original copyright notice is preserved in
+> [LICENSE](LICENSE); attribution and modification details are in [NOTICE](NOTICE).
+> No ownership of the upstream code is claimed here.
+> The npm package name and CLI binary are still `opencode-chatgpt-bridge` (unchanged in this pass).
 
 Architecture (forward path):
 
@@ -30,7 +39,7 @@ not track portfolio/progress, priorities, global governance, ActionIntent, or cr
 ## Quick start
 
 ```bash
-git clone https://github.com/yuga-hashimoto/opencode-chatgpt-bridge.git
+git clone https://github.com/matiasgonzalovq/opencode-chatgpt-bridge.git
 cd opencode-chatgpt-bridge
 pnpm install
 pnpm run build
@@ -412,4 +421,10 @@ decide what to work on or across projects.
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE). The original MIT license text and
+`Copyright (c) 2026 yuga-hashimoto` are preserved exactly as provided upstream.
+
+ADOS Bridge is based on [opencode-chatgpt-bridge](https://github.com/yuga-hashimoto/opencode-chatgpt-bridge)
+by yuga-hashimoto. Modifications and additional ADOS Bridge development are
+`Copyright (c) 2026 Matías Valdebenito Quezada`, released under the same MIT terms.
+See [NOTICE](NOTICE) for the full attribution statement.

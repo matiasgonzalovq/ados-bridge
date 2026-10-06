@@ -1,0 +1,21 @@
+ADOS Bridge
+Copyright (c) 2026 Matías Valdebenito Quezada
+
+This repository, ADOS Bridge, is based on the upstream project "opencode-chatgpt-bridge"
+(https://github.com/yuga-hashimoto/opencode-chatgpt-bridge), created by yuga-hashimoto
+and released under the MIT License.
+
+1. Upstream attribution
+   The original opencode-chatgpt-bridge code, structure, and documentation are the work of
+   yuga-hashimoto. All credit for the original implementation belongs to yuga-hashimoto.
+
+2. License
+   ADOS Bridge remains available under the MIT License. The original MIT license text and
+   the copyright notice "Copyright (c) 2026 yuga-hashimoto" are preserved unchanged in the
+   LICENSE file of this repository. No ownership of the upstream code is claimed here.
+
+3. Modifications
+   Modifications, additions, and other ADOS Bridge development made in this repository are
+   Copyright (c) 2026 Matías Valdebenito Quezada and are provided under the same MIT terms
+   as the upstream project. This copyright applies only to the changes made on top of the
+   upstream code, not to the upstream code itself.
