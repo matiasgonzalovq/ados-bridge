@@ -86,7 +86,7 @@ local repository
 Only the bridge is reachable from outside; OpenCode and the repository stay local. ADOS Project OS is
 shown as a future/optional integration and is **not** part of this release.
 
-This project is intentionally separate from LocalAnt and from ADOS Project OS. It is focused only on
+This project is intentionally separate from ADOS Project OS. It is focused only on
 the ChatGPT <-> opencode bridge use case. It is **not** a global project administration layer: it does
 not track portfolio/progress, priorities, global governance, ActionIntent, or cross-project decisions
 (see [V1 scope](#v1-scope)).
@@ -111,7 +111,7 @@ When the bridge starts, it prints a setup guide with:
 - local health URL
 - local MCP URL
 - automatic fallback port when the preferred port is already in use
-- public HTTPS MCP URL when tunnel is enabled; Tailscale background service defaults to port 10000 to avoid LocalAnt using 443 and other active Funnel listeners
+- public HTTPS MCP URL when tunnel is enabled; Tailscale background service defaults to port 10000 to avoid conflicting with 443 and other active Funnel listeners
 - ChatGPT settings link
 - connector name, description, and URL to paste
 - header auth (preferred); the token itself is always masked
@@ -362,7 +362,7 @@ its content). A non-Git repo returns a structured `NOT_A_GIT_REPO` error rather 
 
 ```text
 Use opencode local bridge. First call bridge_health and list_projects.
-Then create a session for /Volumes/MOVESPEED/Documents/GitHub/my-repo,
+Then create a session for /path/to/repos/my-repo,
 ask opencode to fix the README, poll status, and show opencode_get_diff.
 ```
 

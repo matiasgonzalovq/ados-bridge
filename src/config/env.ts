@@ -78,7 +78,7 @@ export function loadConfig(argv = process.argv.slice(2)): BridgeConfig {
     host: pick(args, "host", "OPENCODE_BRIDGE_HOST", "127.0.0.1") ?? "127.0.0.1",
     port: pickNumber(args, "port", "OPENCODE_BRIDGE_PORT", 8787),
     autoPort: pickBoolean(args, "auto-port", "OPENCODE_BRIDGE_AUTO_PORT", true),
- allowedHosts: parseList(pick(args, "allowed-hosts", "OPENCODE_BRIDGE_ALLOWED_HOSTS"), ["127.0.0.1", "localhost", "hashimotoyugamac-mini.tailf9f6e3.ts.net"]),
+ allowedHosts: parseList(pick(args, "allowed-hosts", "OPENCODE_BRIDGE_ALLOWED_HOSTS"), ["127.0.0.1", "localhost"]),
     allowedRoots,
     bridgeToken: pick(args, "token", "OPENCODE_BRIDGE_TOKEN"),
     checkpoints: pickBoolean(args, "checkpoints", "OPENCODE_BRIDGE_CHECKPOINTS", true),
