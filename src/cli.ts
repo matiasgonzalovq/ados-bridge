@@ -63,7 +63,7 @@ Background mode on macOS:
   opencode-chatgpt-bridge uninstall-service
 
 Recommended first run:
-  opencode-chatgpt-bridge init --allowed-roots /Volumes/MOVESPEED/Documents/GitHub
+  opencode-chatgpt-bridge init --allowed-roots /path/to/repos
   opencode-chatgpt-bridge install-service
 `);
 }
