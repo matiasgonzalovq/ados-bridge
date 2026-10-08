@@ -54,6 +54,8 @@ What is implemented and shipped in V1:
 
 ## Architecture
 
+![How it works — ChatGPT connects to ADOS Bridge over MCP, ADOS Bridge drives a local OpenCode session, with explicit human checkpoints for sensitive actions](docs/images/architecture.webp)
+
 ```mermaid
 flowchart LR
     CG["ChatGPT / ChatGPT Mobile"] -->|"Secure MCP connector (/mcp)"| TUN["Secure MCP tunnel<br/>Cloudflare / Tailscale Funnel"]
@@ -90,6 +92,12 @@ This project is intentionally separate from ADOS Project OS. It is focused only 
 the ChatGPT <-> opencode bridge use case. It is **not** a global project administration layer: it does
 not track portfolio/progress, priorities, global governance, ActionIntent, or cross-project decisions
 (see [V1 scope](#v1-scope)).
+
+## Typical workflow
+
+From a request to execution, with explicit human checkpoints for sensitive actions:
+
+![Typical workflow — describe the task, ADOS Bridge processes it over MCP, review and approve, OpenCode executes locally](docs/images/workflow.webp)
 
 ## Quick start
 
