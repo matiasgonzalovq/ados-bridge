@@ -7,7 +7,7 @@ import { destructiveCheckpoint, filterInsideRepo, resolveInsideRepo } from "../s
 import { checkpointResult, safeTool } from "./results.js";
 import { requireSession, type RegisterContext } from "./session.js";
 import { sendPrompt } from "./send.js";
-import { answerQuestion, listInterventions } from "./interventions.js";
+import { answerQuestion, listInterventions, rejectQuestion } from "./interventions.js";
 import { buildReport } from "./state.js";
 import { opencodeGitDiff, opencodeGitStatus } from "./git.js";
 
@@ -22,7 +22,7 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
     { name: "opencode-chatgpt-bridge", version: "0.1.0" },
     {
       instructions:
-"Use this server to control local opencode sessions. Always validate a repo with list_projects or create_session first. For an operational answer to \"what is happening\", call opencode_state: it derives idle/busy/waiting-human/stalled/error from several signals instead of trusting raw busy alone, and lists pending permissions/questions. Prefer async messages for long work, then poll opencode_state/opencode_get_messages and review get_diff before claiming changes are complete. When retrying a send after an ambiguous failure, reuse the same messageID: the bridge and opencode both dedupe on it. For REAL repository evidence (branch, clean/staged/untracked files, diffs) call opencode_git_status and opencode_git_diff: they read local Git inside the session repo only and never mutate the index or working tree. Destructive tools (opencode_stop, opencode_abort, opencode_respond_permission, opencode_answer_question) return a destructive checkpoint first: review it, then re-send the same call with confirmCheckpoint=true to proceed. File reads are contained to the session repository."
+"Use this server to control local opencode sessions. Always validate a repo with list_projects or create_session first. For an operational answer to \"what is happening\", call opencode_state: it derives idle/busy/waiting-human/stalled/error from several signals instead of trusting raw busy alone, and lists pending permissions/questions. Prefer async messages for long work, then poll opencode_state/opencode_get_messages and review get_diff before claiming changes are complete. When retrying a send after an ambiguous failure, reuse the same messageID: the bridge and opencode both dedupe on it. For REAL repository evidence (branch, clean/staged/untracked files, diffs) call opencode_git_status and opencode_git_diff: they read local Git inside the session repo only and never mutate the index or working tree. Destructive tools (opencode_stop, opencode_abort, opencode_respond_permission, opencode_answer_question, opencode_reject_question) return a destructive checkpoint first: review it, then re-send the same call with confirmCheckpoint=true to proceed. File reads are contained to the session repository."
     }
   );
 
@@ -182,7 +182,10 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
         "Derives from pending permissions/questions, observed events, recent messages, raw " +
         "session status and inactivity time instead of trusting busy alone. Reports " +
         "pendingInterventions, lastActivityAt/inactiveForMs, current/last operation, lastError, " +
-        "and how well the session resolved (availability). Never invents data: unknown fields are null or [].",
+        "and how well the session resolved (availability). Never invents data: unknown fields are null or []. " +
+        "Safety rule for automated callers: treat the task as complete only when observationComplete " +
+        "is true and completionEvidence is corroborated-success; otherwise keep polling or escalate " +
+        "to a human — never infer completion from idle alone.",
       inputSchema: { bridgeSessionId: z.string().min(1) },
       annotations: { readOnlyHint: true, openWorldHint: false }
     },
@@ -207,18 +210,35 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
     {
       title: "Answer opencode question",
       description:
-        "Answer a pending opencode question with an explicit human choice. answers holds one array " +
-        "of selected option labels per question, in order. Destructive: requires " +
+        "Answer a pending opencode v1 question or v2 form with an explicit human choice. Use answers " +
+        "for v1 (selected labels per question) or answer for v2 (original field keys and typed values), never both. Destructive: requires " +
         "confirmCheckpoint=true when checkpoints are enabled.",
       inputSchema: {
         bridgeSessionId: z.string().min(1),
         questionId: z.string().min(1),
-        answers: z.array(z.array(z.string().min(1))).min(1),
+        answers: z.array(z.array(z.string().min(1))).min(1).optional(),
+        answer: z.record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.array(z.string())])).optional(),
         confirmCheckpoint: z.boolean().default(false)
       },
       annotations: { readOnlyHint: false, openWorldHint: false }
     },
     async (input) => answerQuestion(ctx, input)
+  );
+
+  server.registerTool(
+    "opencode_reject_question",
+    {
+      title: "Reject opencode question",
+      description:
+        "Reject a pending v1 question or cancel a pending v2 form. Requires explicit human confirmation via confirmCheckpoint=true when checkpoints are enabled.",
+      inputSchema: {
+        bridgeSessionId: z.string().min(1),
+        questionId: z.string().min(1),
+        confirmCheckpoint: z.boolean().default(false)
+      },
+      annotations: { readOnlyHint: false, openWorldHint: false }
+    },
+    async (input) => rejectQuestion(ctx, input)
   );
 
   server.registerTool(
@@ -229,6 +249,8 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
         "Send a prompt to an opencode session. Use async=true for long-running coding tasks. " +
         "Pass messageID to make the send idempotent: reuse the same value when retrying after an " +
         "ambiguous failure and the bridge/opencode will not create a second prompt. " +
+        "Set dependsOnPreviousCompletion=true only for a continuation that requires the prior run; " +
+        "it is blocked unless completion is fully observed and corroborated. Leave it false for the first legitimate send. " +
         "On success, stateTouch reports whether bridge bookkeeping after the send succeeded; " +
         "a failed stateTouch never means the prompt was not accepted.",
       inputSchema: {
@@ -240,7 +262,8 @@ export function createBridgeMcpServer(ctx: RegisterContext): McpServer {
         agent: z.string().optional(),
         system: z.string().optional(),
         noReply: z.boolean().optional(),
-        messageID: z.string().min(1).optional()
+        messageID: z.string().min(1).optional(),
+        dependsOnPreviousCompletion: z.boolean().default(false)
       },
       annotations: { readOnlyHint: false, openWorldHint: false }
     },

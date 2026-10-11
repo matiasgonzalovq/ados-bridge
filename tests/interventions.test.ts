@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { answerQuestion, listInterventions, reconcileInterventions } from "../src/mcp/interventions.js";
+import { answerQuestion, listInterventions, reconcileInterventions, rejectQuestion } from "../src/mcp/interventions.js";
 import { makeContext, makeFakeClient, makeTempRepo } from "./fakes.js";
 import type { PermissionRequest, QuestionRequest } from "../src/opencode/client.js";
 import type { InterventionRecord } from "../src/types.js";
@@ -116,13 +116,17 @@ describe("opencode_answer_question", () => {
     });
 
     expect(result.isError).toBeUndefined();
-    expect(result.structuredContent).toEqual({
+    expect(result.structuredContent).toMatchObject({
       ok: true,
       questionId: "quest_1",
       answers: [["repo-a", "repo-b"]],
-      answered: true
+      answered: true,
+      applied: true,
+      alreadyResolved: false
     });
-    expect(client.calls.answerQuestion).toEqual([{ requestID: "quest_1", answers: [["repo-a", "repo-b"]] }]);
+    expect(client.calls.answerQuestion).toEqual([
+      { sessionId: "ses_probe", requestID: "quest_1", input: { answers: [["repo-a", "repo-b"]], answer: undefined } }
+    ]);
   });
 
   it("never retries a rejected answer and surfaces opencode's 404", async () => {
@@ -199,6 +203,71 @@ describe("opencode_answer_question", () => {
 
     expect(result.isError).toBeUndefined();
     expect(result.structuredContent).toMatchObject({ ok: true, answered: false });
+  });
+
+  it("passes a v2 structured answer without converting keys or values", async () => {
+    const root = await makeTempRepo();
+    const client = makeFakeClient();
+    const { ctx, seed } = await makeContext({ allowedRoots: [root], client });
+    const bridge = await seed(root);
+    const answer = { target: "repo-a", count: 2, enabled: true, tags: ["safe"] };
+
+    const result = await answerQuestion(ctx, {
+      bridgeSessionId: bridge.bridgeSessionId,
+      questionId: "frm_1",
+      answer,
+      confirmCheckpoint: true
+    });
+
+    expect(result.isError).toBeUndefined();
+    expect(result.structuredContent).toMatchObject({ ok: true, questionId: "frm_1", answer, answered: true });
+    expect(client.calls.answerQuestion).toEqual([
+      { sessionId: "ses_probe", requestID: "frm_1", input: { answers: undefined, answer } }
+    ]);
+  });
+
+  it("rejects mixed v1/v2 payloads before touching opencode", async () => {
+    const root = await makeTempRepo();
+    const client = makeFakeClient();
+    const { ctx, seed } = await makeContext({ allowedRoots: [root], client });
+    const bridge = await seed(root);
+    const result = await answerQuestion(ctx, {
+      bridgeSessionId: bridge.bridgeSessionId,
+      questionId: "frm_1",
+      answers: [["a"]],
+      answer: { field: "a" },
+      confirmCheckpoint: true
+    });
+    expect(result.isError).toBe(true);
+    expect(client.calls.answerQuestion).toHaveLength(0);
+  });
+});
+
+describe("opencode_reject_question", () => {
+  it("requires explicit human confirmation", async () => {
+    const root = await makeTempRepo();
+    const client = makeFakeClient();
+    const { ctx, seed } = await makeContext({ allowedRoots: [root], client });
+    const bridge = await seed(root);
+    const result = await rejectQuestion(ctx, { bridgeSessionId: bridge.bridgeSessionId, questionId: "frm_1" });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({ requiresConfirmation: true, tool: "opencode_reject_question" });
+    expect(client.calls.rejectQuestion).toHaveLength(0);
+  });
+
+  it("uses the bridge-owned opencode session when confirmed", async () => {
+    const root = await makeTempRepo();
+    const client = makeFakeClient();
+    const { ctx, seed } = await makeContext({ allowedRoots: [root], client });
+    const bridge = await seed(root);
+    const result = await rejectQuestion(ctx, {
+      bridgeSessionId: bridge.bridgeSessionId,
+      questionId: "frm_1",
+      confirmCheckpoint: true
+    });
+    expect(result.isError).toBeUndefined();
+    expect(result.structuredContent).toMatchObject({ ok: true, rejected: true, applied: true });
+    expect(client.calls.rejectQuestion).toEqual([{ sessionId: "ses_probe", requestID: "frm_1" }]);
   });
 });
 

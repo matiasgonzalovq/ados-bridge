@@ -39,7 +39,8 @@ export const MANAGED = {
 
 export type FakeClientCalls = {
   sendMessage: Array<Record<string, unknown>>;
-  answerQuestion: Array<{ requestID: string; answers: string[][] }>;
+  answerQuestion: Array<{ sessionId: string; requestID: string; input: Record<string, unknown> }>;
+  rejectQuestion: Array<{ sessionId: string; requestID: string }>;
 };
 
 export type FakeClient = {
@@ -51,7 +52,8 @@ export type FakeClient = {
   getMessages: (sessionId: string, limit?: number) => Promise<OpencodeMessage[]>;
   getMessageIfExists: (sessionId: string, messageID: string) => Promise<unknown>;
   sendMessage: (input: Record<string, unknown>) => Promise<unknown>;
-  answerQuestion: (requestID: string, answers: string[][]) => Promise<boolean>;
+  answerQuestion: (sessionId: string, requestID: string, input: Record<string, unknown>) => Promise<{ applied: boolean; alreadyResolved: boolean }>;
+  rejectQuestion: (sessionId: string, requestID: string) => Promise<{ applied: boolean; alreadyResolved: boolean }>;
 };
 
 export type FakeFailureKey = "getSessionStatus" | "listPermissions" | "listQuestions" | "getMessages";
@@ -59,6 +61,8 @@ export type FakeFailureKey = "getSessionStatus" | "listPermissions" | "listQuest
 export type FakeClientOptions = {
   /** When false, getSession rejects with a 404 (session does not exist on opencode). */
   sessionExists?: boolean;
+  /** Extra fields merged into the getSession payload (e.g. v2 outcome/time). */
+  sessionInfo?: Record<string, unknown>;
   statuses?: Record<string, Record<string, unknown>>;
   permissions?: unknown[];
   questions?: unknown[];
@@ -74,7 +78,7 @@ export type FakeClientOptions = {
 };
 
 export function makeFakeClient(options: FakeClientOptions = {}): FakeClient {
-  const calls: FakeClientCalls = { sendMessage: [], answerQuestion: [] };
+  const calls: FakeClientCalls = { sendMessage: [], answerQuestion: [], rejectQuestion: [] };
   const fail = (name: FakeFailureKey) => {
     const message = options.failures?.[name];
     if (message) throw new Error(message);
@@ -85,7 +89,7 @@ export function makeFakeClient(options: FakeClientOptions = {}): FakeClient {
       if (options.sessionExists === false) {
         throw new Error(`opencode GET /session/${id} failed: 404 Not Found - {"name":"SessionNotFoundError"}`);
       }
-      return { id, title: "probe" };
+      return { id, title: "probe", ...(options.sessionInfo ?? {}) };
     },
     async getSessionStatus() {
       fail("getSessionStatus");
@@ -111,10 +115,14 @@ export function makeFakeClient(options: FakeClientOptions = {}): FakeClient {
       if (options.sendMessageError) throw new Error(options.sendMessageError);
       return { accepted: true };
     },
-    async answerQuestion(requestID: string, answers: string[][]) {
-      calls.answerQuestion.push({ requestID, answers });
+    async answerQuestion(sessionId: string, requestID: string, input: Record<string, unknown>) {
+      calls.answerQuestion.push({ sessionId, requestID, input });
       if (options.answerQuestionError) throw new Error(options.answerQuestionError);
-      return options.answerQuestionResult ?? true;
+      return { applied: options.answerQuestionResult ?? true, alreadyResolved: false };
+    },
+    async rejectQuestion(sessionId: string, requestID: string) {
+      calls.rejectQuestion.push({ sessionId, requestID });
+      return { applied: true, alreadyResolved: false };
     }
   };
 }

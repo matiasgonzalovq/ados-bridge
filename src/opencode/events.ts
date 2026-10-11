@@ -1,6 +1,9 @@
 /**
  * Observation of the opencode event stream (GET /event, SSE) as served by opencode 1.18.30
- * (verified against the local OpenAPI spec and a live server).
+ * (verified against the local OpenAPI spec and a live server), with a fallback to
+ * GET /api/event for OpenCode 2.x (verified live against 2.0.20: same `data: {json}`
+ * framing, Basic auth, `: heartbeat` comments, envelopes
+ * `{id, created, type, location?, data:{sessionID,...}}`).
  *
  * Goals for V1: bounded operational state only. No history, no blocking of the bridge,
  * one reader per server, controlled start, reconnect with backoff, full cleanup on stop.
@@ -55,8 +58,22 @@ function extractSessionId(payload: Record<string, unknown>): string | undefined 
   return undefined;
 }
 
-function isIdleMarker(type: string, payload: Record<string, unknown>): boolean {
+/**
+ * Terminal-execution markers that close the currently observed run.
+ * - v1: `session.idle`, or `session.status` carrying an idle status.
+ * - v2 (verified live on 2.0.20): `session.execution.succeeded`.
+ *
+ * A marker only records `lastCompletion` (used for the last-operation display):
+ * it is NOT proof that every pending task finished — failures, queued inbox
+ * items and late-arriving human requests are tracked by their own signals
+ * (message errors, inbox/permission polling). Hypothetical failure/interruption
+ * execution events were never observed on the wire and are deliberately NOT
+ * markers: an unknown terminal state must stay visible as the current event,
+ * never be rewritten into a completion.
+ */
+function isCompletionMarker(type: string, payload: Record<string, unknown>): boolean {
   if (type === "session.idle") return true;
+  if (type === "session.execution.succeeded") return true;
   if (type !== "session.status") return false;
   const container = (payload.properties ?? payload.data ?? {}) as Record<string, unknown>;
   const status = container.status as { type?: unknown } | undefined;
@@ -192,11 +209,10 @@ export class OpencodeEventObserver {
       headers.Authorization = `Basic ${Buffer.from(`${user}:${this.password}`).toString("base64")}`;
     }
 
-    const response = await this.fetchImpl(`${this.baseUrl}/event`, { headers, signal: controller.signal });
-    if (!response.ok || !response.body) {
-      throw new Error(`event stream unavailable: ${response.status} ${response.statusText}`);
+    const response = await this.openStream(["/event", "/api/event"], headers, controller.signal);
+    if (!response.body) {
+      throw new Error("event stream unavailable: empty body");
     }
-
     const connectedAt = this.now();
     this.connected = true;
     this.connections += 1;
@@ -229,6 +245,45 @@ export class OpencodeEventObserver {
     return connectedAt;
   }
 
+  /**
+   * Open a validated SSE stream, trying each route in order.
+   *
+   * v1 serves `GET /event`; OpenCode 2.x answers that path with the web-app
+   * HTML (HTTP 200, verified live) and streams on `GET /api/event`. A route is
+   * skipped — never treated as connected — when it is unambiguously the wrong
+   * generation: HTTP 404/405, or HTTP 200 whose content-type is present and is
+   * not `text/event-stream` (the HTML-200 trap). Anything else (other HTTP
+   * errors, auth failures, network/abort errors) throws immediately so real
+   * outages and bad credentials keep surfacing instead of being masked by a
+   * fallback. Auth headers, the abort signal, cancellation and the reconnect
+   * backoff are unchanged.
+   */
+  private async openStream(routes: string[], headers: Record<string, string>, signal: AbortSignal): Promise<Response> {
+    let fallback: Error | null = null;
+    for (let index = 0; index < routes.length; index += 1) {
+      const route = routes[index] as string;
+      const last = index === routes.length - 1;
+      const response = await this.fetchImpl(`${this.baseUrl}${route}`, { headers, signal });
+      if (!response.ok) {
+        await response.text().catch(() => undefined);
+        if (!last && (response.status === 404 || response.status === 405)) {
+          fallback = new Error(`event stream unavailable: ${response.status} ${response.statusText} on ${route}`);
+          continue;
+        }
+        throw new Error(`event stream unavailable: ${response.status} ${response.statusText}`);
+      }
+      const contentType = response.headers.get("content-type") ?? "";
+      if (contentType && !contentType.includes("text/event-stream")) {
+        await response.text().catch(() => undefined);
+        fallback = new Error(`event stream unavailable: unexpected content-type ${contentType} on ${route}`);
+        if (!last) continue;
+        throw fallback;
+      }
+      return response;
+    }
+    throw fallback ?? new Error("event stream unavailable");
+  }
+
   private consumeBlock(block: string): void {
     for (const line of block.split(/\r?\n/)) this.consumeLine(line);
   }
@@ -250,6 +305,10 @@ export class OpencodeEventObserver {
   private record(payload: Record<string, unknown>): void {
     const type = payload.type;
     if (typeof type !== "string" || type.length === 0) return;
+    // Timestamps stay local: v2 envelopes carry a server-side `created` field in
+    // epoch milliseconds (unit verified live), but stalled/error recency math must
+    // compare like-for-like clocks, so server time is never mixed into activity
+    // timestamps. No dates are invented; `created` is intentionally ignored.
     const at = this.now();
     this.lastEventAt = at;
 
@@ -270,7 +329,7 @@ export class OpencodeEventObserver {
       observation.lastErrorAt = at;
     }
 
-    if (isIdleMarker(type, payload)) observation.lastCompletion = event;
+    if (isCompletionMarker(type, payload)) observation.lastCompletion = event;
   }
 
   private touch(sessionID: string): SessionObservation {

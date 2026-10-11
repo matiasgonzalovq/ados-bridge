@@ -78,7 +78,7 @@ export function getSetupGuide({ config, localUrl, publicUrl, opencodeStatus }: S
     "   Keep allowed roots narrow. Review opencode_get_diff before committing or pushing changes.",
     "   Tokens stay masked here and in logs; only the show-token command prints the raw value.",
     "   Sessions are re-checked against allowed roots on every call; read_file/find_files stay inside the repo.",
-    "   Destructive tools (stop/abort/permission) require confirmCheckpoint=true.",
+    "   Destructive tools (stop/abort/permission/question answer or reject) require confirmCheckpoint=true.",
     ""
   ]
     .filter((line): line is string => line !== undefined)

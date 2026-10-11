@@ -1,5 +1,6 @@
 import { destructiveCheckpoint, type DestructiveCheckpoint } from "../security/checkpoints.js";
 import type { InterventionRecord, ToolResult } from "../types.js";
+import type { FormAnswer } from "../opencode/client.js";
 import { checkpointResult, safeTool, toolResult } from "./results.js";
 import { requireSession, type RegisterContext } from "./session.js";
 
@@ -22,7 +23,7 @@ export async function listInterventions(
     const bridge = await requireSession(ctx, bridgeSessionId);
     const managed = await ctx.processManager.ensure(bridge.repoPath);
     const client = ctx.processManager.clientFor(managed);
-    const [permissions, questions] = await Promise.all([client.listPermissions(), client.listQuestions()]);
+    const [permissions, questions] = await Promise.all([client.listPermissions(bridge.opencodeSessionId), client.listQuestions(bridge.opencodeSessionId)]);
     const own = (item: { sessionID?: string }) => item.sessionID === bridge.opencodeSessionId;
     return {
       session: { bridgeSessionId: bridge.bridgeSessionId, opencodeSessionId: bridge.opencodeSessionId },
@@ -122,16 +123,21 @@ export async function reconcileInterventions(
 export type AnswerQuestionInput = {
   bridgeSessionId: string;
   questionId: string;
-  /** One entry per question in the pending request, each holding the selected labels. */
-  answers: string[][];
+  /** v1: one entry per question, each holding selected labels. */
+  answers?: string[][];
+  /** v2: field-keyed values, preserved without conversion. */
+  answer?: FormAnswer;
   confirmCheckpoint?: boolean;
 };
 
 export type AnswerQuestionResult = {
   ok: boolean;
   questionId: string;
-  answers: string[][];
+  answers?: string[][];
+  answer?: FormAnswer;
   answered: boolean;
+  alreadyResolved: boolean;
+  resolution?: "answered" | "cancelled";
 };
 
 /**
@@ -153,18 +159,74 @@ export async function answerQuestion(
   if (gate) return checkpointResult(gate);
 
   return await safeTool(async () => {
-    if (!Array.isArray(input.answers) || input.answers.length === 0) {
-      throw new Error("answers must contain one entry per question (array of selected labels)");
+    if ((input.answers === undefined) === (input.answer === undefined)) {
+      throw new Error("provide exactly one of answers (v1) or answer (v2)");
     }
-    for (const entry of input.answers) {
-      if (!Array.isArray(entry) || entry.some((label) => typeof label !== "string" || label.length === 0)) {
-        throw new Error("each answer must be a non-empty array of option labels");
+    if (input.answers !== undefined) {
+      if (!Array.isArray(input.answers) || input.answers.length === 0) {
+        throw new Error("answers must contain one entry per question (array of selected labels)");
+      }
+      for (const entry of input.answers) {
+        if (!Array.isArray(entry) || entry.some((label) => typeof label !== "string" || label.length === 0)) {
+          throw new Error("each answer must be a non-empty array of option labels");
+        }
       }
     }
     const bridge = await requireSession(ctx, input.bridgeSessionId);
     const managed = await ctx.processManager.ensure(bridge.repoPath);
     const client = ctx.processManager.clientFor(managed);
-    const answered = await client.answerQuestion(input.questionId, input.answers);
-    return { ok: true, questionId: input.questionId, answers: input.answers, answered: Boolean(answered) };
+    const mutation = await client.answerQuestion(bridge.opencodeSessionId, input.questionId, {
+      answers: input.answers,
+      answer: input.answer
+    });
+    return {
+      ok: true,
+      questionId: input.questionId,
+      ...(input.answers === undefined ? {} : { answers: input.answers }),
+      ...(input.answer === undefined ? {} : { answer: input.answer }),
+      answered: mutation.applied || (mutation.alreadyResolved && mutation.resolution === "answered"),
+      ...mutation
+    };
+  });
+}
+
+export type RejectQuestionInput = {
+  bridgeSessionId: string;
+  questionId: string;
+  confirmCheckpoint?: boolean;
+};
+
+export type RejectQuestionResult = {
+  ok: boolean;
+  questionId: string;
+  rejected: boolean;
+  applied: boolean;
+  alreadyResolved: boolean;
+  resolution?: "answered" | "cancelled";
+};
+
+export async function rejectQuestion(
+  ctx: RegisterContext,
+  input: RejectQuestionInput
+): Promise<ToolResult<RejectQuestionResult | { ok: false; error: string } | DestructiveCheckpoint>> {
+  const gate = destructiveCheckpoint({
+    enabled: ctx.config.checkpoints,
+    confirmed: input.confirmCheckpoint ?? false,
+    tool: "opencode_reject_question",
+    action: "reject or cancel a pending opencode question/form",
+    target: input.questionId
+  });
+  if (gate) return checkpointResult(gate);
+  return await safeTool(async () => {
+    const bridge = await requireSession(ctx, input.bridgeSessionId);
+    const managed = await ctx.processManager.ensure(bridge.repoPath);
+    const client = ctx.processManager.clientFor(managed);
+    const mutation = await client.rejectQuestion(bridge.opencodeSessionId, input.questionId);
+    return {
+      ok: true,
+      questionId: input.questionId,
+      rejected: mutation.applied || (mutation.alreadyResolved && mutation.resolution === "cancelled"),
+      ...mutation
+    };
   });
 }

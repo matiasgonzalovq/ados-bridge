@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildReport } from "../src/mcp/state.js";
+import { buildReport, isCompletionSafe } from "../src/mcp/state.js";
 import { fakeRegistry, makeContext, makeFakeClient, makeObservation, makeTempRepo } from "./fakes.js";
 import type { OpencodeStateReport } from "../src/types.js";
 
@@ -215,7 +215,89 @@ describe("opencode_state", () => {
     expect(report.state).toBe("idle");
     expect(report.rawOpenCodeState).toBeNull();
     expect(report.notes.join(" | ")).toContain("session status unavailable");
-    expect(report.notes.join(" | ")).toContain("pending questions unavailable");
+    // Unknown reads are explicit non-zeros, never silent empties.
+    expect(report.notes.join(" | ")).toContain("pending questions unknown (zero NOT confirmed)");
+    expect(report.pendingInterventions).toEqual({ permissions: [], questions: [] });
+  });
+
+  it("marks unknown permission reads as explicitly unconfirmed", async () => {
+    const root = await makeTempRepo();
+    const client = makeFakeClient({ failures: { listPermissions: "boom 500" } });
+    const { ctx, seed } = await makeContext({ allowedRoots: [root], client });
+    const bridge = await seed(root);
+
+    const report = payload(await buildReport(ctx, bridge.bridgeSessionId));
+
+    expect(report.notes.join(" | ")).toContain("pending permissions unknown (zero NOT confirmed)");
+    expect(report.pendingInterventions.permissions).toEqual([]);
+  });
+
+  it("corroborates completion from server-stamped outcome and idle time", async () => {
+    const root = await makeTempRepo();
+    const idleAt = Date.now() - 30_000;
+    const client = makeFakeClient({
+      statuses: {},
+      sessionInfo: { outcome: "succeeded", time: { created: idleAt - 60_000, updated: idleAt, idle: idleAt } }
+    });
+    const { ctx, seed } = await makeContext({ allowedRoots: [root], client });
+    const bridge = await seed(root);
+
+    const report = payload(await buildReport(ctx, bridge.bridgeSessionId));
+
+    expect(report.state).toBe("idle");
+    expect(report.notes.join(" | ")).toContain("completion corroborated: opencode outcome=succeeded");
+    expect(report.notes.join(" | ")).toContain("server-reported");
+    expect(report.lastError).toBeNull();
+  });
+
+  it("reports a server-stamped failed outcome as lastError without newer signals", async () => {
+    const root = await makeTempRepo();
+    const idleAt = Date.now() - 30_000;
+    const client = makeFakeClient({
+      statuses: {},
+      sessionInfo: { outcome: "failed", time: { created: idleAt - 60_000, updated: idleAt, idle: idleAt } }
+    });
+    const { ctx, seed } = await makeContext({ allowedRoots: [root], client });
+    const bridge = await seed(root);
+
+    const report = payload(await buildReport(ctx, bridge.bridgeSessionId));
+
+    expect(report.lastError).toBe("opencode reported outcome: failed");
+    expect(report.notes.join(" | ")).toContain("completion corroborated: opencode outcome=failed");
+  });
+
+  it("prefers newer message errors over a stamped interrupted outcome", async () => {
+    const root = await makeTempRepo();
+    const now = Date.now();
+    const client = makeFakeClient({
+      statuses: {},
+      sessionInfo: { outcome: "interrupted", time: { created: now - 120_000, updated: now - 100_000, idle: now - 100_000 } },
+      messages: [
+        {
+          info: { role: "assistant", time: { created: now - 1_000 }, error: { name: "APIError", message: "nope" } },
+          parts: []
+        }
+      ]
+    });
+    const { ctx, seed } = await makeContext({ allowedRoots: [root], client });
+    const bridge = await seed(root);
+
+    const report = payload(await buildReport(ctx, bridge.bridgeSessionId));
+
+    expect(report.lastError).toBe("APIError: nope");
+    expect(report.notes.join(" | ")).toContain("completion corroborated: opencode outcome=interrupted");
+  });
+
+  it("ignores non-terminal or malformed outcome payloads", async () => {
+    const root = await makeTempRepo();
+    const client = makeFakeClient({ statuses: {}, sessionInfo: { outcome: "running", time: {} } });
+    const { ctx, seed } = await makeContext({ allowedRoots: [root], client });
+    const bridge = await seed(root);
+
+    const report = payload(await buildReport(ctx, bridge.bridgeSessionId));
+
+    expect(report.lastError).toBeNull();
+    expect(report.notes.join(" | ")).not.toContain("completion corroborated");
   });
 
   it("reports server-unreachable without inventing a session state", async () => {
@@ -461,5 +543,191 @@ describe("opencode_state stale intervention reconciliation", () => {
 
     expect(report.state).toBe("waiting-human");
     expect(report.pendingInterventions.permissions.map((item) => item.id)).toEqual(["perm_unknown"]);
+  });
+});
+
+describe("opencode_state safety guard (CP1.49-B)", () => {
+  it("marks a healthy v1 report complete-but-uncorroborated: never auto-completes v1 idle", async () => {
+    const root = await makeTempRepo();
+    const client = makeFakeClient({ statuses: { ses_probe: { type: "idle" } } });
+    const { ctx, seed } = await makeContext({ allowedRoots: [root], client });
+    const bridge = await seed(root);
+
+    const report = payload(await buildReport(ctx, bridge.bridgeSessionId));
+
+    expect(report.observationComplete).toBe(true);
+    expect(report.completionEvidence).toBe("uncorroborated");
+    expect(isCompletionSafe(report)).toBe(false);
+  });
+
+  it("authorizes completion only for corroborated success with complete observation", async () => {
+    const root = await makeTempRepo();
+    const idleAt = Date.now() - 30_000;
+    const client = makeFakeClient({
+      statuses: {},
+      sessionInfo: { outcome: "succeeded", time: { created: idleAt - 60_000, updated: idleAt, idle: idleAt } }
+    });
+    const { ctx, seed } = await makeContext({ allowedRoots: [root], client });
+    const bridge = await seed(root);
+
+    const report = payload(await buildReport(ctx, bridge.bridgeSessionId));
+
+    expect(report.state).toBe("idle");
+    expect(report.observationComplete).toBe(true);
+    expect(report.completionEvidence).toBe("corroborated-success");
+    expect(isCompletionSafe(report)).toBe(true);
+  });
+
+  it("never celebrates a corroborated failure as completable", async () => {
+    const root = await makeTempRepo();
+    const idleAt = Date.now() - 30_000;
+    const client = makeFakeClient({
+      statuses: {},
+      sessionInfo: { outcome: "failed", time: { created: idleAt - 60_000, updated: idleAt, idle: idleAt } }
+    });
+    const { ctx, seed } = await makeContext({ allowedRoots: [root], client });
+    const bridge = await seed(root);
+
+    const report = payload(await buildReport(ctx, bridge.bridgeSessionId));
+
+    // A recent confirmed failure with nothing newer is an error state, not idle.
+    expect(report.state).toBe("error");
+    expect(report.lastError).toBe("opencode reported outcome: failed");
+    expect(report.completionEvidence).toBe("not-applicable");
+    expect(isCompletionSafe(report)).toBe(false);
+  });
+
+  it("keeps corroborated-failure visible but unsafe when newer activity exists", async () => {
+    const root = await makeTempRepo();
+    const now = Date.now();
+    const client = makeFakeClient({
+      statuses: {},
+      messages: [{ info: { id: "msg_u", role: "user", time: { created: now - 1_000 } }, parts: [] }],
+      sessionInfo: { outcome: "failed", time: { created: now - 120_000, updated: now - 100_000, idle: now - 100_000 } }
+    });
+    const { ctx, seed } = await makeContext({ allowedRoots: [root], client });
+    const bridge = await seed(root);
+
+    const report = payload(await buildReport(ctx, bridge.bridgeSessionId));
+
+    expect(report.state).toBe("idle");
+    expect(report.completionEvidence).toBe("corroborated-failure");
+    expect(report.lastError).toBe("opencode reported outcome: failed");
+    expect(isCompletionSafe(report)).toBe(false);
+  });
+
+  it.each(["getSessionStatus", "listPermissions", "listQuestions", "getMessages"] as const)(
+    "marks observation incomplete when %s fails, keeping v1-compatible state",
+    async (key) => {
+      const root = await makeTempRepo();
+      const client = makeFakeClient({ statuses: { ses_probe: { type: "idle" } }, failures: { [key]: "boom" } });
+      const { ctx, seed } = await makeContext({ allowedRoots: [root], client });
+      const bridge = await seed(root);
+
+      const report = payload(await buildReport(ctx, bridge.bridgeSessionId));
+
+      expect(report.observationComplete).toBe(false);
+      expect(isCompletionSafe(report)).toBe(false);
+      // Derivation itself is unchanged (v1 parity): the guard travels in fields, not in state.
+      expect(report.state).toBe("idle");
+      expect(report.availability).toBe("ready");
+    }
+  );
+
+  it("marks contradictory evidence (busy status, succeeded outcome) not-applicable", async () => {
+    const root = await makeTempRepo();
+    const now = Date.now();
+    const client = makeFakeClient({
+      statuses: { ses_probe: { type: "busy" } },
+      messages: [{ info: { id: "msg_u", role: "user", time: { created: now - 5_000 } }, parts: [] }],
+      sessionInfo: { outcome: "succeeded", time: { created: now - 60_000, updated: now - 5_000 } }
+    });
+    const { ctx, seed } = await makeContext({ allowedRoots: [root], client });
+    const bridge = await seed(root);
+
+    const report = payload(await buildReport(ctx, bridge.bridgeSessionId));
+
+    expect(report.state).toBe("busy");
+    expect(report.completionEvidence).toBe("not-applicable");
+    expect(isCompletionSafe(report)).toBe(false);
+  });
+
+  it("marks waiting-human not-applicable for completion even when corroborated", async () => {
+    const root = await makeTempRepo();
+    const client = makeFakeClient({
+      statuses: { ses_probe: { type: "busy" } },
+      permissions: [{ id: "per_1", sessionID: "ses_probe", permission: "edit" }],
+      sessionInfo: { outcome: "succeeded", time: { created: Date.now() - 60_000, updated: Date.now() - 1_000 } }
+    });
+    const { ctx, seed } = await makeContext({ allowedRoots: [root], client });
+    const bridge = await seed(root);
+
+    const report = payload(await buildReport(ctx, bridge.bridgeSessionId));
+
+    expect(report.state).toBe("waiting-human");
+    expect(report.completionEvidence).toBe("not-applicable");
+    expect(isCompletionSafe(report)).toBe(false);
+  });
+
+  it("marks unresolved reports incomplete and never completable", async () => {
+    const root = await makeTempRepo();
+    const client = makeFakeClient({ sessionExists: false });
+    const { ctx, seed } = await makeContext({ allowedRoots: [root], client });
+    const bridge = await seed(root);
+
+    const report = payload(await buildReport(ctx, bridge.bridgeSessionId));
+
+    expect(report.availability).toBe("session-not-found");
+    expect(report.observationComplete).toBe(false);
+    expect(report.completionEvidence).toBe("not-applicable");
+    expect(isCompletionSafe(report)).toBe(false);
+  });
+
+  it("treats SSE disconnection as auxiliary: polling still completes observation", async () => {
+    const root = await makeTempRepo();
+    const client = makeFakeClient({ statuses: { ses_probe: { type: "idle" } } });
+    // No events registry: the observer stream is disconnected/absent.
+    const { ctx, seed } = await makeContext({ allowedRoots: [root], client });
+    const bridge = await seed(root);
+
+    const report = payload(await buildReport(ctx, bridge.bridgeSessionId));
+
+    expect(report.observationComplete).toBe(true);
+    expect(report.lastOperation).toBeNull();
+    // …but a v1 idle is still never auto-completable.
+    expect(isCompletionSafe(report)).toBe(false);
+  });
+
+  it("simulates the automated-consumer rule across the full matrix", () => {
+    const base: OpencodeStateReport = {
+      project: { repoPath: "/r", authorized: true },
+      session: { bridgeSessionId: "b", opencodeSessionId: "ses_x" },
+      availability: "ready",
+      rawOpenCodeState: null,
+      lastActivityAt: null,
+      inactiveForMs: null,
+      currentOperation: null,
+      lastOperation: null,
+      pendingInterventions: { permissions: [], questions: [] },
+      lastError: null,
+      execution: { startedAt: null, lastEventAt: null },
+      notes: [],
+      observationComplete: true,
+      completionEvidence: "uncorroborated",
+      state: "idle"
+    };
+    const cases: Array<[string, Partial<OpencodeStateReport>, boolean]> = [
+      ["idle+complete+corroborated-success → proceed", { completionEvidence: "corroborated-success" }, true],
+      ["idle+complete+uncorroborated → poll", {}, false],
+      ["idle+complete+corroborated-failure → escalate, never celebrate", { completionEvidence: "corroborated-failure" }, false],
+      ["idle+incomplete+corroborated-success → re-poll", { observationComplete: false, completionEvidence: "corroborated-success" }, false],
+      ["busy → poll", { state: "busy", completionEvidence: "not-applicable" }, false],
+      ["stalled → escalate", { state: "stalled", completionEvidence: "not-applicable" }, false],
+      ["waiting-human → answer flow", { state: "waiting-human", completionEvidence: "not-applicable" }, false],
+      ["error → escalate", { state: "error", completionEvidence: "not-applicable" }, false]
+    ];
+    for (const [label, patch, expected] of cases) {
+      expect(isCompletionSafe({ ...base, ...patch }), label).toBe(expected);
+    }
   });
 });

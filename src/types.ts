@@ -60,6 +60,21 @@ export type OperationRef = { type: string; at: string } | null;
 /** Opencode intervention payload, passed through as reported by OpenCode (never reshaped). */
 export type InterventionRecord = { [key: string]: JsonValue };
 
+/**
+ * Machine-readable completion evidence for an `idle` report (CP1.49-B guard).
+ * - `corroborated-success`: server-stamped terminal `outcome: succeeded` (v2 only).
+ * - `corroborated-failure`: server-stamped `outcome: failed|interrupted` (v2 only).
+ * - `uncorroborated`: idle with no terminal evidence. Every v1 idle is
+ *   uncorroborated by construction: a v1 idle must NEVER be reported as a
+ *   completed execution.
+ * - `not-applicable`: the state is not `idle` (busy/stalled/waiting-human/error).
+ */
+export type CompletionEvidence =
+  | "corroborated-success"
+  | "corroborated-failure"
+  | "uncorroborated"
+  | "not-applicable";
+
 export type OpencodeStateReport = {
   project: { repoPath: string; authorized: boolean };
   session: { bridgeSessionId: string; opencodeSessionId: string };
@@ -75,6 +90,17 @@ export type OpencodeStateReport = {
   execution: { startedAt: string | null; lastEventAt: string | null };
   /** Non-fatal observation problems (e.g. a list endpoint that could not be reached). */
   notes: string[];
+  /**
+   * Safety guard for automated consumers. True only when every observation
+   * layer (status, permissions, questions, messages) returned confirmed data.
+   * When false, `idle`/`ready` must NOT be treated as safe-to-proceed: keep
+   * polling or escalate to a human instead of continuing execution, declaring
+   * the task complete, answering interventions, or starting dependent work.
+   * The event stream is auxiliary and does not affect this flag.
+   */
+  observationComplete: boolean;
+  /** Whether an `idle` state rests on server-stamped terminal evidence. */
+  completionEvidence: CompletionEvidence;
 };
 
 export type OpencodeMessagePart = {

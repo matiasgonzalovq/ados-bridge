@@ -11,6 +11,7 @@ import { OpencodeProcessManager } from "../opencode/process.js";
 import { EventObserverRegistry } from "../opencode/events.js";
 import { StateStore } from "../state/store.js";
 import { createBridgeMcpServer } from "../mcp/tools.js";
+import { captureMetadataProbeOnce } from "../mcp/metadata-probe.js";
 
 export type BridgeRuntime = {
   config: BridgeConfig;
@@ -107,6 +108,7 @@ export async function startHttpServer(runtime: BridgeRuntime): Promise<Server> {
   const transports: Record<string, StreamableHTTPServerTransport> = {};
 
   const mcpPostHandler = async (req: Request, res: Response) => {
+    await captureMetadataProbeOnce(req).catch(() => undefined);
     const sessionIdHeader = req.headers["mcp-session-id"];
     const sessionId = Array.isArray(sessionIdHeader) ? sessionIdHeader[0] : sessionIdHeader;
     try {

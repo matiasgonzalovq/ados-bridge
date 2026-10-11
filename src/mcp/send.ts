@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
 import type { JsonValue, ToolResult } from "../types.js";
+import { DuplicatePromptError } from "../opencode/client.js";
 import { safeTool } from "./results.js";
 import { requireSession, type RegisterContext } from "./session.js";
+import { buildReport, isCompletionSafe } from "./state.js";
 
 export type SendPromptInput = {
   bridgeSessionId: string;
@@ -18,6 +20,8 @@ export type SendPromptInput = {
    * bridge additionally checks whether the message already exists before sending.
    */
   messageID?: string;
+  /** Gate continuations that depend on a previous run; false/omitted is a legitimate initial send. */
+  dependsOnPreviousCompletion?: boolean;
 };
 
 export type SendPromptResult = {
@@ -64,6 +68,19 @@ export async function sendPrompt(
 ): Promise<ToolResult<SendPromptResult | { ok: false; error: string }>> {
   return await safeTool(async (): Promise<SendPromptResult> => {
     const bridge = await requireSession(ctx, input.bridgeSessionId);
+    if (input.dependsOnPreviousCompletion === true) {
+      const observed = await buildReport(ctx, input.bridgeSessionId);
+      const report = observed.structuredContent;
+      if (observed.isError || typeof report !== "object" || report === null || "ok" in report) {
+        throw new Error("dependent send blocked: previous execution could not be observed safely");
+      }
+      if (!isCompletionSafe(report)) {
+        throw new Error(
+          `dependent send blocked: previous execution is not safely complete ` +
+            `(state=${report.state}, observationComplete=${report.observationComplete}, completionEvidence=${report.completionEvidence})`
+        );
+      }
+    }
     const managed = await ctx.processManager.ensure(bridge.repoPath);
     const client = ctx.processManager.clientFor(managed);
     const async = input.async ?? true;
@@ -92,17 +109,36 @@ export async function sendPrompt(
       }
     }
 
-    const response = await client.sendMessage({
-      sessionId: bridge.opencodeSessionId,
-      text: input.text,
-      async,
-      providerID: input.providerID,
-      modelID: input.modelID,
-      agent: input.agent,
-      system: input.system,
-      noReply: input.noReply,
-      messageID
-    });
+    let response: Awaited<ReturnType<typeof client.sendMessage>>;
+    try {
+      response = await client.sendMessage({
+        sessionId: bridge.opencodeSessionId,
+        text: input.text,
+        async,
+        ...(input.providerID === undefined ? {} : { providerID: input.providerID }),
+        ...(input.modelID === undefined ? {} : { modelID: input.modelID }),
+        ...(input.agent === undefined ? {} : { agent: input.agent }),
+        ...(input.system === undefined ? {} : { system: input.system }),
+        ...(input.noReply === undefined ? {} : { noReply: input.noReply }),
+        messageID
+      });
+    } catch (error) {
+      // The server already holds this id (409 verified by read-back): report
+      // the accepted prompt as a duplicate instead of failing or resending.
+      if (error instanceof DuplicatePromptError && error.promptMessageID === messageID) {
+        noteActivity();
+        return {
+          ok: true,
+          accepted: true,
+          duplicate: true,
+          messageID,
+          async,
+          response: json(error.existing),
+          stateTouch: { ok: true, error: null }
+        };
+      }
+      throw error;
+    }
     noteActivity();
 
     // The prompt is accepted here: a secondary state touch must not turn into "send failed".

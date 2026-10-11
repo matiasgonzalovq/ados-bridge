@@ -33,8 +33,10 @@ What is implemented and shipped in V1:
 - **Operational state** — `opencode_state` derives `idle` / `busy` / `waiting-human` / `stalled` /
   `error` from session status, pending interventions, recent messages, and a bounded SSE reader per
   managed server, instead of a raw busy flag.
-- **Human interventions and checkpoints** — pending permissions and questions are listed and answered
-  explicitly (`opencode_list_interventions`, `opencode_respond_permission`, `opencode_answer_question`).
+- **Human interventions and checkpoints** — pending permissions and questions/forms are listed, answered,
+  or rejected explicitly (`opencode_list_interventions`, `opencode_respond_permission`,
+  `opencode_answer_question`, `opencode_reject_question`). OpenCode v1 question arrays and v2 typed form
+  fields remain distinct; the bridge does not perform lossy conversion.
   Destructive tools return a checkpoint and only run with `confirmCheckpoint=true` (default on), and
   the bridge never picks an answer for you.
 - **Idempotent messaging** — `opencode_send_message` accepts a `messageID`, so an ambiguous send can be
@@ -278,14 +280,15 @@ explicitly, otherwise it reports `401 Unauthorized`. Treat this as a human debug
 - `opencode_create_session` - create a new opencode session and return a `bridgeSessionId`.
 - `opencode_list_sessions` - list bridge sessions known to this bridge.
 - `opencode_get_session_status` - poll status for a session.
-- `opencode_send_message` - send a prompt; defaults to async mode; accepts an optional `messageID` for idempotent retries.
+- `opencode_send_message` - send a prompt; defaults to async mode; accepts an optional `messageID` for idempotent retries and an optional `dependsOnPreviousCompletion` guard for dependent continuations.
 - `opencode_get_messages` - fetch session transcript/messages.
 - `opencode_get_diff` - fetch file diffs for a session.
 - `opencode_abort` - abort a running session.
 - `opencode_respond_permission` - respond to opencode permission prompts.
 - `opencode_state` - derived operational state, pending interventions, activity, and last error for one session.
 - `opencode_list_interventions` - pending opencode permissions and questions for one session.
-- `opencode_answer_question` - answer a pending opencode question (checkpointed).
+- `opencode_answer_question` - answer a pending v1 question or v2 typed form (checkpointed).
+- `opencode_reject_question` - reject a pending v1 question or cancel a pending v2 form (checkpointed).
 
 ### project inspection tools
 
@@ -331,12 +334,14 @@ events (heartbeats, plugins) never count as session activity.
 
 ### Interventions
 
-`opencode_list_interventions` polls `GET /permission` and `GET /question` and filters them to the
-session, so polling still works when the bridge attached to the event stream late.
-`opencode_answer_question` posts the chosen labels (`answers` holds one array of option labels per
-question) and is checkpointed: it returns a destructive checkpoint first and only runs with
-`confirmCheckpoint=true`. Answering is always an explicit human choice; the bridge never picks an
-option itself. An unknown question id surfaces opencode's 404 as an error, without retrying.
+`opencode_list_interventions` uses the generation-appropriate session-scoped reads and filters every
+record to the bridge-owned OpenCode session. `opencode_answer_question` accepts exactly one payload:
+v1 `answers` (selected labels per question) or v2 `answer` (original field keys with string, number,
+boolean, or string-array values). V2 fields are validated against required/conditional status, type,
+range, length, pattern, format, options, and external acknowledgement before one POST. The companion
+`opencode_reject_question` uses v1 reject or v2 DELETE. Both are checkpointed and never invent values.
+An ambiguous mutation is not retried; a v2 409 is read back and reported as already answered/cancelled
+only when that terminal state is confirmed.
 
 ### Prompt idempotency
 
@@ -346,6 +351,10 @@ id, and the bridge additionally checks whether the message already exists and re
 `duplicate: true` instead of sending again. The bridge never retries an ambiguous POST on its own.
 The result also reports `stateTouch`, which says whether the bridge's own bookkeeping after the
 send worked; a failed `stateTouch` never means the prompt was rejected.
+
+For a follow-up that must not start until a previous run succeeded, set
+`dependsOnPreviousCompletion=true`. The bridge then requires a complete observation and server-stamped
+`corroborated-success`. Leave it false/omitted for the first legitimate send to a new session.
 
 ## Git evidence (read-only)
 

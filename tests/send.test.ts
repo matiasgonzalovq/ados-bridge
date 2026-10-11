@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { normalizeMessageId, newMessageId, sendPrompt } from "../src/mcp/send.js";
+import { DuplicatePromptError } from "../src/opencode/client.js";
 import { makeContext, makeFakeClient, makeTempRepo, type FakeClient } from "./fakes.js";
 
 function withFailingTouch(client: FakeClient, allowedRoots: string[]) {
@@ -45,7 +46,37 @@ describe("opencode_send_message idempotency", () => {
     expect(result.isError).toBeUndefined();
     expect(result.structuredContent).toMatchObject({ ok: true, accepted: true, duplicate: false, messageID: "msg_retry-1" });
     expect(client.calls.sendMessage).toHaveLength(1);
-    expect(client.calls.sendMessage[0]).toMatchObject({ messageID: "msg_retry-1", text: "hello", async: true });
+    expect(client.calls.sendMessage[0]).toEqual({
+      sessionId: bridge.opencodeSessionId,
+      messageID: "msg_retry-1",
+      text: "hello",
+      async: true
+    });
+  });
+
+  it("preserves explicitly requested v1-only options without adding omitted ones", async () => {
+    const root = await makeTempRepo();
+    const client = makeFakeClient();
+    const { ctx, seed } = await makeContext({ allowedRoots: [root], client });
+    const bridge = await seed(root);
+
+    await sendPrompt(ctx, {
+      bridgeSessionId: bridge.bridgeSessionId,
+      text: "hello",
+      providerID: "provider",
+      modelID: "model",
+      agent: "Build",
+      system: "system",
+      noReply: false
+    });
+
+    expect(client.calls.sendMessage[0]).toMatchObject({
+      providerID: "provider",
+      modelID: "model",
+      agent: "Build",
+      system: "system",
+      noReply: false
+    });
   });
 
   it("does not create a second prompt when the same messageID was already accepted", async () => {
@@ -89,6 +120,39 @@ describe("opencode_send_message idempotency", () => {
     expect(client.calls.sendMessage).toHaveLength(1);
   });
 
+  it("blocks a dependent continuation when idle is uncorroborated", async () => {
+    const root = await makeTempRepo();
+    const client = makeFakeClient({ statuses: {} });
+    const { ctx, seed } = await makeContext({ allowedRoots: [root], client });
+    const bridge = await seed(root);
+    const result = await sendPrompt(ctx, {
+      bridgeSessionId: bridge.bridgeSessionId,
+      text: "continue",
+      dependsOnPreviousCompletion: true
+    });
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.structuredContent)).toContain("completionEvidence=uncorroborated");
+    expect(client.calls.sendMessage).toHaveLength(0);
+  });
+
+  it("allows a dependent continuation only after corroborated successful completion", async () => {
+    const root = await makeTempRepo();
+    const idleAt = Date.now() - 1_000;
+    const client = makeFakeClient({
+      statuses: {},
+      sessionInfo: { outcome: "succeeded", time: { idle: idleAt } }
+    });
+    const { ctx, seed } = await makeContext({ allowedRoots: [root], client });
+    const bridge = await seed(root);
+    const result = await sendPrompt(ctx, {
+      bridgeSessionId: bridge.bridgeSessionId,
+      text: "continue",
+      dependsOnPreviousCompletion: true
+    });
+    expect(result.isError).toBeUndefined();
+    expect(client.calls.sendMessage).toHaveLength(1);
+  });
+
   it("never retries an ambiguous POST", async () => {
     const root = await makeTempRepo();
     const client = makeFakeClient({ sendMessageError: "socket hang up (response never observed)" });
@@ -129,5 +193,27 @@ describe("opencode_send_message idempotency", () => {
 
     expect(result.isError).toBe(true);
     expect(client.calls.sendMessage).toHaveLength(0);
+  });
+
+  it("reports a 409-verified conflict as duplicate without resending", async () => {
+    const root = await makeTempRepo();
+    const base = makeFakeClient();
+    const existing = { info: { id: "msg_retry-1", role: "user" }, parts: [] as unknown[] };
+    let posts = 0;
+    const client: FakeClient = {
+      ...base,
+      sendMessage: async () => {
+        posts += 1;
+        throw new DuplicatePromptError("msg_retry-1", existing as never);
+      }
+    };
+    const { ctx, seed } = await makeContext({ allowedRoots: [root], client });
+    const bridge = await seed(root);
+
+    const result = await sendPrompt(ctx, { bridgeSessionId: bridge.bridgeSessionId, text: "hello", messageID: "retry-1" });
+
+    expect(result.isError).toBeUndefined();
+    expect(result.structuredContent).toMatchObject({ ok: true, accepted: true, duplicate: true, messageID: "msg_retry-1" });
+    expect(posts).toBe(1);
   });
 });

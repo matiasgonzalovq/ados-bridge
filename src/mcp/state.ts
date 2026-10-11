@@ -3,6 +3,7 @@ import type { SessionObservation } from "../opencode/events.js";
 import { deriveOperationalState, inactiveForMs, stalledThresholdMs } from "../state/derive.js";
 import type {
   BridgeSession,
+  CompletionEvidence,
   InterventionRecord,
   OpencodeMessage,
   OpencodeStateReport,
@@ -70,7 +71,10 @@ function unresolved(
     pendingInterventions: { permissions: [], questions: [] },
     lastError: options.lastError,
     execution: { startedAt: null, lastEventAt: null },
-    notes: options.notes ?? []
+    notes: options.notes ?? [],
+    // No observation completed: nothing here is safe to proceed on.
+    observationComplete: false,
+    completionEvidence: "not-applicable"
   };
 }
 
@@ -78,10 +82,42 @@ function isRepoAllowlistError(message: string): boolean {
   return message.includes("outside allowed roots");
 }
 
+/** Terminal outcomes stamped by opencode itself (v2 `Session.Info`). */
+const TERMINAL_OUTCOMES: ReadonlySet<string> = new Set(["succeeded", "failed", "interrupted"]);
+
+/**
+ * Server-stamped completion evidence from a session payload, reused from the
+ * existence check so no extra request is needed. v1 payloads lack these
+ * fields and yield null (unknown, never a claim in either direction).
+ */
+function sessionCompletionOf(value: unknown): { outcome?: string; idleAt?: number } {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return {};
+  const record = value as Record<string, unknown>;
+  const result: { outcome?: string; idleAt?: number } = {};
+  if (typeof record.outcome === "string" && TERMINAL_OUTCOMES.has(record.outcome)) {
+    result.outcome = record.outcome;
+  }
+  const time = record.time;
+  if (typeof time === "object" && time !== null && !Array.isArray(time)) {
+    const idle = (time as Record<string, unknown>).idle;
+    if (typeof idle === "number" && Number.isFinite(idle)) result.idleAt = idle;
+  }
+  return result;
+}
+
 /**
  * Build the operational state report for one bridge session.
  * Every field is either observed or null/[]: nothing is inferred beyond the signals below
  * (session status, event stream observation, recent messages, pending interventions).
+ *
+ * Unknown-vs-empty contract: a failed intervention read (permissions/questions)
+ * is recorded in `notes` as explicitly NOT a confirmed zero and contributes no
+ * pending count. Counts — and therefore `waiting-human` — come only from
+ * confirmed records. Completion is likewise never claimed from mere absence:
+ * `idle` means "no evidence of work", while server-stamped terminal evidence
+ * (`outcome`, `time.idle`, reused from the existence check at no extra cost)
+ * is reported verbatim in `notes` (and as `lastError` for failed outcomes when
+ * no newer error signal exists).
  */
 export async function buildReport(
   ctx: RegisterContext,
@@ -120,8 +156,11 @@ export async function buildReport(
     }
 
     const client = ctx.processManager.clientFor(managed);
+    // The payload is kept: on v2 it carries server-stamped completion evidence
+    // (`outcome`, `time.idle`) reused below at no extra request cost.
+    let sessionInfo: unknown;
     try {
-      await client.getSession(session.opencodeSessionId);
+      sessionInfo = await client.getSession(session.opencodeSessionId);
     } catch (error) {
       const message = errorText(error);
       const missing = /failed:\s*404/.test(message);
@@ -131,6 +170,13 @@ export async function buildReport(
         lastError: missing ? `opencode session not found: ${session.opencodeSessionId}` : message
       });
     }
+    const completion = sessionCompletionOf(sessionInfo);
+    if (completion.outcome !== undefined) {
+      notes.push(`completion corroborated: opencode outcome=${completion.outcome}`);
+    }
+    if (completion.idleAt !== undefined) {
+      notes.push(`session idle since ${new Date(completion.idleAt).toISOString()} (server-reported)`);
+    }
 
     const observer = ctx.events?.ensure({
       baseUrl: managed.baseUrl,
@@ -138,17 +184,20 @@ export async function buildReport(
       password: managed.password
     });
 
+    // Tri-state reads: a failure yields null (unknown), which contributes no
+    // pending count. The note states explicitly that zero is NOT confirmed, so
+    // an unknown query can never be mistaken for a confirmed empty list.
     const [statuses, permissions, questions, messages] = await Promise.all([
       client.getSessionStatus().catch((error: unknown) => {
         notes.push(`session status unavailable: ${errorText(error, 200)}`);
         return null;
       }),
-      client.listPermissions().catch((error: unknown) => {
-        notes.push(`pending permissions unavailable: ${errorText(error, 200)}`);
+      client.listPermissions(session.opencodeSessionId).catch((error: unknown) => {
+        notes.push(`pending permissions unknown (zero NOT confirmed): ${errorText(error, 200)}`);
         return null;
       }),
-      client.listQuestions().catch((error: unknown) => {
-        notes.push(`pending questions unavailable: ${errorText(error, 200)}`);
+      client.listQuestions(session.opencodeSessionId).catch((error: unknown) => {
+        notes.push(`pending questions unknown (zero NOT confirmed): ${errorText(error, 200)}`);
         return null;
       }),
       client.getMessages(session.opencodeSessionId, MESSAGE_SAMPLE).catch((error: unknown) => {
@@ -184,12 +233,25 @@ export async function buildReport(
     const messageFailure = messageErrorOf(recent);
     const observerErrorAt = observation?.lastErrorAt ?? null;
     const observerError = observation?.lastError ?? null;
+    // Server-stamped terminal failure is the lowest-priority error source: it
+    // is always reported, but never overrides a newer, more specific signal.
+    // Its time is the server-reported idle timestamp when present; without one
+    // it is displayed in `lastError` without driving state (no date invented).
+    const outcomeFailureText =
+      completion.outcome === "failed" || completion.outcome === "interrupted"
+        ? `opencode reported outcome: ${completion.outcome}`
+        : null;
+    const outcomeFailureAt = outcomeFailureText !== null ? (completion.idleAt ?? null) : null;
     const lastError =
       observerErrorAt !== null && (messageFailure === null || observerErrorAt >= messageFailure.at)
         ? observerError
-        : messageFailure?.text ?? null;
+        : (messageFailure?.text ?? outcomeFailureText);
     const lastErrorAt =
-      messageFailure === null ? observerErrorAt : observerErrorAt !== null && observerErrorAt >= messageFailure.at ? observerErrorAt : messageFailure.at;
+      messageFailure === null
+        ? (observerErrorAt ?? outcomeFailureAt)
+        : observerErrorAt !== null && observerErrorAt >= messageFailure.at
+          ? observerErrorAt
+          : messageFailure.at;
 
     const now = Date.now();
     const rawState = rawStateOf(statuses?.[ownSessionId]);
@@ -202,6 +264,18 @@ export async function buildReport(
       lastErrorAt,
       stalledMs: stalledThresholdMs(ctx.config.stalledMs)
     });
+
+    // Safety guard (CP1.49-B): complete only when every layer answered.
+    const observationComplete =
+      statuses !== null && permissions !== null && questions !== null && messages !== null;
+    const completionEvidence: CompletionEvidence =
+      state !== "idle"
+        ? "not-applicable"
+        : completion.outcome === "succeeded"
+          ? "corroborated-success"
+          : completion.outcome === "failed" || completion.outcome === "interrupted"
+            ? "corroborated-failure"
+            : "uncorroborated";
 
     const busy = rawState === "busy" || rawState === "retry";
     let newestUserAt: number | null = null;
@@ -235,7 +309,28 @@ export async function buildReport(
         startedAt: busy && newestUserAt !== null ? new Date(newestUserAt).toISOString() : null,
         lastEventAt: observation?.lastEventAt ? new Date(observation.lastEventAt).toISOString() : null
       },
+      observationComplete,
+      completionEvidence,
       notes
     };
   });
+}
+
+/**
+ * The single choke point for automated completion claims (CP1.49-B guard).
+ *
+ * Returns true ONLY for `idle` reports with complete observation and
+ * server-stamped `outcome: succeeded`. Every other combination — incomplete
+ * observation, uncorroborated or failed idle, any non-idle state — must keep
+ * polling or escalate to a human. In particular this never authorizes, on its
+ * own: continuing an execution, declaring a task complete, answering an
+ * intervention, or starting work that depends on the previous result.
+ * Automated consumers must call this instead of parsing `notes[]` text.
+ */
+export function isCompletionSafe(
+  report: Pick<OpencodeStateReport, "state" | "observationComplete" | "completionEvidence">
+): boolean {
+  return (
+    report.state === "idle" && report.observationComplete && report.completionEvidence === "corroborated-success"
+  );
 }
